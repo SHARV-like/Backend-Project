@@ -1,0 +1,16 @@
+{
+  "name": "backend-revision-project",
+  "version": "1.0.0",
+  "description": "backend project (production grade)",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "chai",
+    "javascript",
+    "backend"
+  ],
+  "author": "Sharv",
+  "license": "ISC"
+}
