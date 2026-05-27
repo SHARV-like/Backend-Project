@@ -38,9 +38,9 @@ Reason:
 - It keeps the code style closer to current backend JavaScript standards.
 - It avoids mixing CommonJS `require` syntax with ES module syntax later.
 
-### 3. Added a development script
+### 3. Added the first development script
 
-The `package.json` file includes:
+During the initial setup, the project started with this development script:
 
 ```json
 "dev": "nodemon src/index.js"
@@ -52,7 +52,7 @@ Reason:
 - `nodemon` automatically restarts the server whenever source files change.
 - It improves development speed because the server does not need to be restarted manually after every edit.
 
-The development command will be:
+The development command was:
 
 ```bash
 npm run dev
@@ -209,6 +209,164 @@ Reason:
 - `.gitkeep` keeps the `public/temp` folder available in the repository.
 - This folder can later be used for temporary files, such as uploaded files before they are processed or moved.
 
+## Phase Two: Database Connection
+
+Phase Two focused on connecting the backend project to MongoDB. In this phase, runtime dependencies were added, environment variables were loaded, the database name was moved into a constant, and the MongoDB connection logic was separated into its own `db` module.
+
+### 1. Installed runtime dependencies
+
+The project now includes these production dependencies:
+
+```json
+"dependencies": {
+  "dotenv": "^17.4.2",
+  "express": "^5.2.1",
+  "mongoose": "^9.6.2"
+}
+```
+
+Reason:
+
+- `dotenv` loads environment variables from the `.env` file into `process.env`.
+- `mongoose` is used to connect the Node.js backend with MongoDB.
+- `express` is installed for the upcoming server and API setup.
+
+These packages are in `dependencies` because they are needed by the actual backend application, not only during development.
+
+### 2. Updated the development script
+
+The `dev` script now starts the app with `nodemon` and preloads dotenv support:
+
+```json
+"dev": "nodemon -r dotenv/config --experimental-json-modules src/index.js"
+```
+
+Reason:
+
+- `nodemon` restarts the server whenever files change.
+- `-r dotenv/config` preloads dotenv before the app runs.
+- `src/index.js` remains the main backend entry point.
+
+The project can be started with:
+
+```bash
+npm run dev
+```
+
+### 3. Added a database name constant
+
+The `src/constants.js` file now exports the database name:
+
+```js
+export const DB_NAME = "chaiaurcode";
+```
+
+Reason:
+
+- Keeping the database name in one file avoids hardcoding it in multiple places.
+- If the database name changes later, it only needs to be updated in one place.
+- Constants make the code easier to read and maintain.
+
+### 4. Added MongoDB connection logic
+
+A new database connection file was added:
+
+```txt
+src/db/index.js
+```
+
+Current code:
+
+```js
+import mongoose from "mongoose";
+import { DB_NAME } from "../constants.js";
+
+const connectDB = async () => {
+  try {
+    const connectionInstaince = await mongoose.connect(
+      `${process.env.MONGODB_URI}/${DB_NAME}`
+    );
+    console.log(connectionInstaince.connection.host);
+  } catch (error) {
+    console.log("Mogodb connection FAILED : ", error);
+    process.exit(1);
+  }
+};
+
+export default connectDB;
+```
+
+Reason:
+
+- Database connection code is kept separate from the main entry file.
+- `mongoose.connect()` connects the app to MongoDB using the MongoDB URI from `.env`.
+- `DB_NAME` is appended to the MongoDB URI so the app connects to the correct database.
+- `try...catch` handles connection errors instead of allowing the app to fail silently.
+- `process.exit(1)` stops the app when the database connection fails, because the backend should not keep running without a database connection.
+
+Note: `connectionInstaince` is the connection response returned by Mongoose. It can be used to access connection details such as:
+
+```js
+connectionInstaince.connection.host;
+```
+
+### 5. Loaded environment variables in the app entry point
+
+The `src/index.js` file now loads environment variables and then calls the database connection function:
+
+```js
+import dotenv from "dotenv";
+import connectDB from "./db/index.js";
+
+dotenv.config({
+  path: "./.env",
+});
+
+connectDB();
+```
+
+Reason:
+
+- `dotenv.config()` loads variables from `.env`.
+- `path: "./.env"` tells dotenv exactly where the environment file is.
+- `connectDB()` is called after dotenv is configured, so `process.env.MONGODB_URI` is available before Mongoose tries to connect.
+
+### 6. Added MongoDB URI in environment variables
+
+The `.env` file is used to store sensitive configuration like:
+
+```env
+PORT=8000
+MONGODB_URI=mongodb+srv://<username>:<password>@<cluster-url>
+```
+
+Reason:
+
+- The MongoDB connection string contains private credentials.
+- Keeping it in `.env` prevents secrets from being hardcoded in source files.
+- `.env` is ignored by Git, so these values should not be committed.
+
+Important:
+
+- The MongoDB URI must start with `mongodb://` or `mongodb+srv://`.
+- If the URI starts with anything else, Mongoose will throw a `MongoParseError`.
+- The database name is added separately from `DB_NAME`, so the URI itself should contain the cluster connection string.
+
+### 7. Used a professional project structure
+
+Instead of writing the whole connection logic directly inside `src/index.js`, the connection code was moved into:
+
+```txt
+src/db/index.js
+```
+
+Reason:
+
+- `src/index.js` stays clean and focused on starting the app.
+- `src/db/index.js` owns database connection logic.
+- This structure scales better when the project grows.
+- It is easier to debug, test, and maintain separate modules.
+
 ## Current Status
 
-Phase One is complete as a setup phase. The project is ready for the next step: adding the actual backend server logic, installing runtime dependencies, connecting the database, and building routes, controllers, models, and middleware.
+Phase One and Phase Two are complete. The project now has a basic production-style backend structure and a MongoDB connection setup. The next phase can focus on creating the Express app, adding middleware, defining routes, and building models and controllers.
