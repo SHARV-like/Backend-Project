@@ -367,6 +367,289 @@ Reason:
 - This structure scales better when the project grows.
 - It is easier to debug, test, and maintain separate modules.
 
+## Phase Three: Express App Setup and Utility Classes
+
+Phase Three focused on preparing the Express application for real API development. In this phase, the backend was connected to an Express app instance, common middleware was configured, and reusable utility helpers were added for async request handling, API errors, and API responses.
+
+### 1. Installed additional runtime dependencies
+
+The project now includes these additional backend packages:
+
+```json
+"cookie-parser": "^1.4.7",
+"cors": "^2.8.6"
+```
+
+Reason:
+
+- `cors` is used to control which frontend origins can access the backend API.
+- `cookie-parser` allows the backend to read cookies from incoming requests.
+- These packages are runtime dependencies because they are needed when the backend server is actually running.
+
+### 2. Created the Express app configuration file
+
+The `src/app.js` file now creates and exports the Express app:
+
+```js
+import express from "express";
+import cookieParser from "cookie-parser";
+import cors from "cors";
+
+const app = express();
+
+export { app };
+```
+
+Reason:
+
+- Keeping the Express app in `app.js` separates app configuration from server startup.
+- `index.js` can focus on connecting the database and starting the server.
+- This structure keeps the project easier to maintain as routes, middleware, and controllers are added.
+
+### 3. Added CORS middleware
+
+The app now uses:
+
+```js
+app.use(
+  cors({
+    origin: process.env.CORS_ORIGIN,
+    credentials: true,
+  })
+);
+```
+
+Reason:
+
+- CORS controls which frontend application is allowed to communicate with this backend.
+- `origin: process.env.CORS_ORIGIN` keeps the allowed frontend URL configurable through environment variables.
+- `credentials: true` allows cookies and authorization credentials to be sent with requests when needed.
+- This is important for authentication flows that use cookies or sessions.
+
+### 4. Added JSON body parsing
+
+The app now uses:
+
+```js
+app.use(express.json({ limit: "20kb" }));
+```
+
+Reason:
+
+- This allows Express to read JSON data from request bodies.
+- Without this middleware, `req.body` would not contain parsed JSON data.
+- The `20kb` limit protects the server from accepting unnecessarily large JSON payloads.
+
+### 5. Added URL-encoded body parsing
+
+The app now uses:
+
+```js
+app.use(express.urlencoded({ extended: true, limit: "20kb" }));
+```
+
+Reason:
+
+- This allows Express to read form data sent using `application/x-www-form-urlencoded`.
+- `extended: true` allows nested objects to be parsed from form data.
+- The `20kb` limit keeps request body size controlled.
+
+### 6. Added static file serving
+
+The app now uses:
+
+```js
+app.use(express.static("public"));
+```
+
+Reason:
+
+- This makes files inside the `public` folder available as static assets.
+- It prepares the backend to serve files such as images, temporary uploads, or other public resources.
+- This matches the earlier project structure where `public/temp` was created.
+
+### 7. Added cookie parsing
+
+The app now uses:
+
+```js
+app.use(cookieParser());
+```
+
+Reason:
+
+- This middleware parses cookies from incoming requests.
+- It makes cookie values available on `req.cookies`.
+- This is useful for authentication features such as refresh tokens, access tokens, or session-style login flows.
+
+### 8. Connected the Express app with database startup
+
+The `src/index.js` file now imports the app and starts the server only after the database connection succeeds:
+
+```js
+connectDB()
+  .then(() => {
+    app.listen(process.env.PORT || 8000, () => {
+      console.log(`App is running on port : ${process.env.PORT}`);
+    });
+  })
+  .catch((error) => {
+    console.log("MONGO DB connection failed !!! ", error);
+  });
+```
+
+Reason:
+
+- The server should start only after MongoDB is connected successfully.
+- If the database connection fails, the backend should not pretend to be ready.
+- This startup flow makes the app more reliable because API requests will only be accepted after the database layer is available.
+
+### 9. Added async request handler utility
+
+A reusable async handler was added in:
+
+```txt
+src/utils/asyncHandler.js
+```
+
+Current code:
+
+```js
+const asyncHandler = (requestHandler) =>
+  async (req, res, next) => {
+    return Promise.resolve(requestHandler(req, res, next)).catch((error) =>
+      next(error)
+    );
+  };
+
+export { asyncHandler };
+```
+
+Reason:
+
+- Express route handlers often use async database calls.
+- Async errors need to be passed to `next(error)` so Express can handle them properly.
+- Without a helper, every controller would need repeated `try...catch` blocks.
+- `Promise.resolve()` allows the utility to handle both normal return values and promises.
+- This keeps controller code cleaner and more focused on business logic.
+
+Example use:
+
+```js
+const getUsers = asyncHandler(async (req, res) => {
+  const users = await User.find();
+  res.status(200).json(users);
+});
+```
+
+### 10. Added custom API error class
+
+A reusable error class was added in:
+
+```txt
+src/utils/ApiError.js
+```
+
+Current code:
+
+```js
+class ApiError extends Error {
+  constructor(
+    statusCode,
+    message = "Something went wrong",
+    errors = [],
+    stack = ""
+  ) {
+    super(message);
+    this.statusCode = statusCode;
+    this.message = message;
+    this.data = null;
+    this.success = false;
+    this.errors = errors;
+
+    if (stack) {
+      this.stack = stack;
+    } else {
+      Error.captureStackTrace(this, this.constructor);
+    }
+  }
+}
+
+export { ApiError };
+```
+
+Reason:
+
+- Built-in JavaScript errors do not automatically include API-specific fields like `statusCode`, `success`, or `errors`.
+- `ApiError` creates a consistent error object for the whole backend.
+- `statusCode` helps decide the HTTP response code.
+- `success: false` clearly marks the response as failed.
+- `errors` can store extra validation or field-level error details.
+- `Error.captureStackTrace()` keeps useful debugging information while avoiding unnecessary constructor details in the stack trace.
+
+Example use:
+
+```js
+throw new ApiError(404, "User not found");
+```
+
+### 11. Added custom API response class
+
+A reusable response class was added in:
+
+```txt
+src/utils/ApiResponse.js
+```
+
+Current code:
+
+```js
+class ApiResponse {
+  constructor(statusCode, data, message = "Success") {
+    this.statusCode = statusCode;
+    this.data = data;
+    this.message = message;
+    this.success = statusCode < 400;
+  }
+}
+```
+
+Reason:
+
+- API responses should follow a consistent structure.
+- `ApiResponse` keeps successful responses predictable across controllers.
+- `statusCode` stores the HTTP status code.
+- `data` stores the actual response payload.
+- `message` provides a human-readable response message.
+- `success` is calculated from the status code, so responses below `400` are treated as successful.
+
+Example use:
+
+```js
+return res
+  .status(200)
+  .json(new ApiResponse(200, user, "User fetched successfully"));
+```
+
+### 12. Improved project separation of concerns
+
+The backend now separates responsibilities across files:
+
+```txt
+src/
+  app.js              Express app and middleware configuration
+  index.js            Environment setup, database connection, server startup
+  db/index.js         MongoDB connection logic
+  utils/              Reusable helper classes and functions
+```
+
+Reason:
+
+- Each file has a clear responsibility.
+- The entry point does not become crowded with middleware and utility logic.
+- Utilities can be reused by future controllers, routes, and middleware.
+- This structure is easier to scale as the backend grows.
+
 ## Current Status
 
-Phase One and Phase Two are complete. The project now has a basic production-style backend structure and a MongoDB connection setup. The next phase can focus on creating the Express app, adding middleware, defining routes, and building models and controllers.
+Phase One, Phase Two, and Phase Three are complete. The project now has a production-style folder structure, MongoDB connection setup, Express app configuration, common middleware, and reusable API utility helpers. The next phase can focus on creating models, controllers, routes, and centralized error-handling middleware.
