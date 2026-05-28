@@ -367,28 +367,34 @@ Reason:
 - This structure scales better when the project grows.
 - It is easier to debug, test, and maintain separate modules.
 
-## Phase Three: Express App Setup and Utility Classes
+## Phase Three: App Configuration, Utilities, and Models
 
-Phase Three focused on preparing the Express application for real API development. In this phase, the backend was connected to an Express app instance, common middleware was configured, and reusable utility helpers were added for async request handling, API errors, and API responses.
+Phase Three focused on preparing the backend for real API features. In this phase, the Express app was configured, reusable API utilities were added, authentication-related libraries were installed, and the first Mongoose models were created for users and videos.
 
 ### 1. Installed additional runtime dependencies
 
-The project now includes these additional backend packages:
+The project now includes these additional production dependencies:
 
 ```json
+"bcrypt": "^6.0.0",
 "cookie-parser": "^1.4.7",
-"cors": "^2.8.6"
+"cors": "^2.8.6",
+"jsonwebtoken": "^9.0.3",
+"mongoose-aggregate-paginate-v2": "^1.1.4"
 ```
 
 Reason:
 
-- `cors` is used to control which frontend origins can access the backend API.
-- `cookie-parser` allows the backend to read cookies from incoming requests.
-- These packages are runtime dependencies because they are needed when the backend server is actually running.
+- `bcrypt` is used to hash user passwords before saving them in the database.
+- `jsonwebtoken` is used to create access tokens and refresh tokens for authentication.
+- `mongoose-aggregate-paginate-v2` is used to paginate aggregation results, especially useful for video feeds and search results.
+- `cors` controls which frontend origins can access the backend.
+- `cookie-parser` reads cookies from incoming requests.
+- These libraries belong in `dependencies` because the running backend needs them.
 
-### 2. Created the Express app configuration file
+### 2. Configured the Express app
 
-The `src/app.js` file now creates and exports the Express app:
+The `src/app.js` file creates and exports the Express app:
 
 ```js
 import express from "express";
@@ -397,94 +403,34 @@ import cors from "cors";
 
 const app = express();
 
-export { app };
-```
-
-Reason:
-
-- Keeping the Express app in `app.js` separates app configuration from server startup.
-- `index.js` can focus on connecting the database and starting the server.
-- This structure keeps the project easier to maintain as routes, middleware, and controllers are added.
-
-### 3. Added CORS middleware
-
-The app now uses:
-
-```js
 app.use(
   cors({
     origin: process.env.CORS_ORIGIN,
     credentials: true,
   })
 );
-```
-
-Reason:
-
-- CORS controls which frontend application is allowed to communicate with this backend.
-- `origin: process.env.CORS_ORIGIN` keeps the allowed frontend URL configurable through environment variables.
-- `credentials: true` allows cookies and authorization credentials to be sent with requests when needed.
-- This is important for authentication flows that use cookies or sessions.
-
-### 4. Added JSON body parsing
-
-The app now uses:
-
-```js
 app.use(express.json({ limit: "20kb" }));
-```
-
-Reason:
-
-- This allows Express to read JSON data from request bodies.
-- Without this middleware, `req.body` would not contain parsed JSON data.
-- The `20kb` limit protects the server from accepting unnecessarily large JSON payloads.
-
-### 5. Added URL-encoded body parsing
-
-The app now uses:
-
-```js
 app.use(express.urlencoded({ extended: true, limit: "20kb" }));
-```
-
-Reason:
-
-- This allows Express to read form data sent using `application/x-www-form-urlencoded`.
-- `extended: true` allows nested objects to be parsed from form data.
-- The `20kb` limit keeps request body size controlled.
-
-### 6. Added static file serving
-
-The app now uses:
-
-```js
 app.use(express.static("public"));
-```
-
-Reason:
-
-- This makes files inside the `public` folder available as static assets.
-- It prepares the backend to serve files such as images, temporary uploads, or other public resources.
-- This matches the earlier project structure where `public/temp` was created.
-
-### 7. Added cookie parsing
-
-The app now uses:
-
-```js
 app.use(cookieParser());
+
+export { app };
 ```
 
 Reason:
 
-- This middleware parses cookies from incoming requests.
-- It makes cookie values available on `req.cookies`.
-- This is useful for authentication features such as refresh tokens, access tokens, or session-style login flows.
+- `app.js` keeps middleware and Express configuration separate from server startup.
+- `cors()` allows the selected frontend URL to communicate with the backend.
+- `credentials: true` allows cookies or authorization credentials to be sent with requests.
+- `express.json()` parses JSON request bodies and makes them available in `req.body`.
+- `express.urlencoded()` parses form submissions and URL-encoded data.
+- The `20kb` limit protects the server from unnecessarily large request bodies.
+- `express.static("public")` serves public assets from the `public` folder.
+- `cookieParser()` makes browser cookies available on `req.cookies`.
 
-### 8. Connected the Express app with database startup
+### 3. Started the server after database connection
 
-The `src/index.js` file now imports the app and starts the server only after the database connection succeeds:
+The `src/index.js` file imports the Express app and starts listening only after MongoDB connects successfully:
 
 ```js
 connectDB()
@@ -500,19 +446,13 @@ connectDB()
 
 Reason:
 
-- The server should start only after MongoDB is connected successfully.
-- If the database connection fails, the backend should not pretend to be ready.
-- This startup flow makes the app more reliable because API requests will only be accepted after the database layer is available.
+- The backend should not accept requests until the database is ready.
+- This flow prevents API handlers from running when MongoDB is unavailable.
+- It keeps `index.js` focused on environment setup, database connection, and server startup.
 
-### 9. Added async request handler utility
+### 4. Added async request handler utility
 
-A reusable async handler was added in:
-
-```txt
-src/utils/asyncHandler.js
-```
-
-Current code:
+The `src/utils/asyncHandler.js` file contains a higher-order function:
 
 ```js
 const asyncHandler = (requestHandler) =>
@@ -527,30 +467,23 @@ export { asyncHandler };
 
 Reason:
 
-- Express route handlers often use async database calls.
-- Async errors need to be passed to `next(error)` so Express can handle them properly.
-- Without a helper, every controller would need repeated `try...catch` blocks.
-- `Promise.resolve()` allows the utility to handle both normal return values and promises.
-- This keeps controller code cleaner and more focused on business logic.
+- Controllers often contain async code such as database queries and file uploads.
+- Async errors must be passed to `next(error)` so Express error middleware can handle them.
+- This utility avoids writing repeated `try...catch` blocks in every controller.
+- `Promise.resolve()` allows the handler to work with both normal values and promises.
 
-Example use:
+Usage:
 
 ```js
-const getUsers = asyncHandler(async (req, res) => {
-  const users = await User.find();
-  res.status(200).json(users);
+const getVideos = asyncHandler(async (req, res) => {
+  const videos = await Video.find();
+  res.status(200).json(videos);
 });
 ```
 
-### 10. Added custom API error class
+### 5. Added custom API error class
 
-A reusable error class was added in:
-
-```txt
-src/utils/ApiError.js
-```
-
-Current code:
+The `src/utils/ApiError.js` file defines a custom error class:
 
 ```js
 class ApiError extends Error {
@@ -580,28 +513,22 @@ export { ApiError };
 
 Reason:
 
-- Built-in JavaScript errors do not automatically include API-specific fields like `statusCode`, `success`, or `errors`.
-- `ApiError` creates a consistent error object for the whole backend.
-- `statusCode` helps decide the HTTP response code.
+- Normal JavaScript errors do not include API response fields like `statusCode`, `success`, `data`, or `errors`.
+- `ApiError` creates a consistent structure for failed API responses.
+- `statusCode` tells the server which HTTP status code should be sent.
 - `success: false` clearly marks the response as failed.
-- `errors` can store extra validation or field-level error details.
-- `Error.captureStackTrace()` keeps useful debugging information while avoiding unnecessary constructor details in the stack trace.
+- `errors` can store validation errors or multiple field-level errors.
+- `Error.captureStackTrace()` records where the error came from while keeping the stack trace cleaner.
 
-Example use:
+Usage:
 
 ```js
 throw new ApiError(404, "User not found");
 ```
 
-### 11. Added custom API response class
+### 6. Added custom API response class
 
-A reusable response class was added in:
-
-```txt
-src/utils/ApiResponse.js
-```
-
-Current code:
+The `src/utils/ApiResponse.js` file defines a reusable response wrapper:
 
 ```js
 class ApiResponse {
@@ -616,14 +543,13 @@ class ApiResponse {
 
 Reason:
 
-- API responses should follow a consistent structure.
-- `ApiResponse` keeps successful responses predictable across controllers.
+- Successful API responses should follow one predictable structure.
 - `statusCode` stores the HTTP status code.
-- `data` stores the actual response payload.
-- `message` provides a human-readable response message.
-- `success` is calculated from the status code, so responses below `400` are treated as successful.
+- `data` stores the main response payload.
+- `message` provides a readable response message.
+- `success` is calculated from the status code, where codes below `400` are treated as successful.
 
-Example use:
+Usage:
 
 ```js
 return res
@@ -631,7 +557,293 @@ return res
   .json(new ApiResponse(200, user, "User fetched successfully"));
 ```
 
-### 12. Improved project separation of concerns
+### 7. Created the user model
+
+The `src/models/user.model.js` file defines the `User` schema and model:
+
+```js
+export const User = mongoose.model("User", userSchema);
+```
+
+Main fields:
+
+- `username`: unique username, stored in lowercase, trimmed, required, and indexed for faster searching.
+- `email`: unique email, stored in lowercase, trimmed, and required.
+- `fullName`: required display name, trimmed, and indexed for search.
+- `avatar`: required Cloudinary URL for the user's profile image.
+- `coverImage`: optional Cloudinary URL for the user's cover image.
+- `watchHistory`: array of video object IDs for tracking watched videos.
+- `password`: required hashed password.
+- `refreshToken`: stores the latest refresh token when refresh-token based login is implemented.
+
+Reason:
+
+- The user model stores identity, login, profile, and watch-history data.
+- `unique` prevents duplicate usernames and emails.
+- `lowercase` keeps username and email comparisons consistent.
+- `trim` removes unnecessary spaces before saving.
+- `index` improves search performance on fields that may be queried frequently.
+- `timestamps: true` automatically adds `createdAt` and `updatedAt`.
+
+### 8. Used Mongoose schema features
+
+The user and video models use Mongoose schema options and field validators.
+
+Important components:
+
+- `type` defines the JavaScript/MongoDB data type for a field.
+- `required` makes a field mandatory.
+- `unique` asks MongoDB to keep values unique through an index.
+- `lowercase` converts string values to lowercase before saving.
+- `trim` removes extra spaces from string values.
+- `index` creates an index for faster searching.
+- `default` provides a value when the field is not sent.
+- `ref` creates a relationship reference between collections.
+- `timestamps: true` automatically manages `createdAt` and `updatedAt`.
+
+Reason:
+
+- These schema options keep data cleaner and more predictable.
+- Validation rules reduce bad data entering the database.
+- References make it possible to connect users with videos.
+- Timestamps help track when records are created and updated.
+
+### 9. Added password hashing with bcrypt
+
+The user model uses a Mongoose pre-save hook:
+
+```js
+userSchema.pre("save", async function (next) {
+  if (!this.isModified("password")) return next();
+
+  this.password = bcrypt.hash(this.password, 10);
+  next();
+});
+```
+
+Reason:
+
+- Passwords should never be stored as plain text.
+- The `pre("save")` hook runs before a user document is saved.
+- `this.isModified("password")` prevents re-hashing the password when other user fields are updated.
+- `bcrypt.hash(password, 10)` creates a secure one-way hash using 10 salt rounds.
+
+Usage:
+
+```js
+const user = await User.create({
+  username,
+  email,
+  fullName,
+  avatar,
+  password,
+});
+```
+
+When the user is saved, the password is hashed automatically by the pre-save hook.
+
+### 10. Added password comparison method
+
+The user model has an instance method:
+
+```js
+userSchema.methods.isPasswordCorrect = async function (password) {
+  return await bcrypt.compare(password, this.password);
+};
+```
+
+Reason:
+
+- During login, the backend receives a plain password from the user.
+- The database stores only the hashed password.
+- `bcrypt.compare()` safely checks whether the entered password matches the saved hash.
+- Keeping this logic as a model method makes controllers cleaner.
+
+Usage:
+
+```js
+const isPasswordValid = await user.isPasswordCorrect(password);
+```
+
+### 11. Added access token generation method
+
+The user model has this instance method:
+
+```js
+userSchema.methods.generateAccessToken = async function () {
+  return await jwt.sign(
+    {
+      _id: this.id,
+      email: this.email,
+      username: this.username,
+      fullName: this.fullName,
+    },
+    process.env.ACCESS_TOKEN_SECRET,
+    {
+      expiresIn: process.env.ACCESS_TOKEN_EXPIRY,
+    }
+  );
+};
+```
+
+Reason:
+
+- An access token proves that the user is logged in.
+- The token payload stores safe identifying information such as user ID, email, username, and full name.
+- `ACCESS_TOKEN_SECRET` signs the token so the backend can verify that it was created by this app.
+- `ACCESS_TOKEN_EXPIRY` controls how long the access token remains valid.
+
+Usage:
+
+```js
+const accessToken = await user.generateAccessToken();
+```
+
+### 12. Added refresh token generation method
+
+The user model has this instance method:
+
+```js
+userSchema.methods.generateRefreshToken = async function () {
+  return await jwt.sign(
+    {
+      _id: this.id,
+    },
+    process.env.REFRESH_TOKEN_SECRET,
+    {
+      expiresIn: process.env.REFRESH_TOKEN_EXPIRY,
+    }
+  );
+};
+```
+
+Reason:
+
+- Refresh tokens are used to generate new access tokens without asking the user to log in again.
+- The refresh token payload is smaller because it only needs the user ID.
+- `REFRESH_TOKEN_SECRET` signs refresh tokens separately from access tokens.
+- `REFRESH_TOKEN_EXPIRY` is usually longer than access token expiry.
+- Storing the refresh token in the user document allows logout and token rotation flows later.
+
+Usage:
+
+```js
+const refreshToken = await user.generateRefreshToken();
+user.refreshToken = refreshToken;
+await user.save({ validateBeforeSave: false });
+```
+
+### 13. Required authentication environment variables
+
+The JWT methods expect these variables in `.env`:
+
+```env
+ACCESS_TOKEN_SECRET=your_access_token_secret
+ACCESS_TOKEN_EXPIRY=1d
+REFRESH_TOKEN_SECRET=your_refresh_token_secret
+REFRESH_TOKEN_EXPIRY=10d
+```
+
+Reason:
+
+- Secrets should not be hardcoded in source files.
+- Different secrets for access and refresh tokens improve security separation.
+- Expiry values allow the login system to control token lifetime without code changes.
+
+### 14. Created the video model
+
+The `src/models/video.model.js` file defines the `Video` schema and model:
+
+```js
+export const Video = mongoose.model("Video", videoSchema);
+```
+
+Main fields:
+
+- `viedoFile`: required Cloudinary URL for the uploaded video file.
+- `thumbnail`: required Cloudinary URL for the video thumbnail.
+- `title`: required video title.
+- `description`: required video description.
+- `duration`: required video duration, usually returned by Cloudinary.
+- `views`: number of views, defaulting to `0`.
+- `isPublished`: publishing status, defaulting to `true`.
+- `owner`: object ID reference to the user who uploaded the video.
+
+Reason:
+
+- The video model stores all core video metadata.
+- Cloudinary URLs are stored instead of raw files because media files should live in external storage.
+- `views` starts from `0` so a new video has a valid default count.
+- `isPublished` allows videos to be hidden or shown without deleting them.
+- `owner` connects each video to the user who uploaded it.
+- `timestamps: true` records upload and update times.
+
+### 15. Added owner relationship between videos and users
+
+The video schema stores the owner using an ObjectId reference:
+
+```js
+owner: {
+  type: Schema.Types.ObjectId,
+  ref: User,
+}
+```
+
+Reason:
+
+- A video should belong to a user.
+- ObjectId references allow MongoDB documents to stay separate while still being connected.
+- This makes it possible to fetch video owner details later using `populate()` or aggregation.
+
+Usage:
+
+```js
+const video = await Video.findById(videoId).populate("owner");
+```
+
+### 16. Added aggregate pagination plugin
+
+The video schema uses:
+
+```js
+videoSchema.plugin(mongooseAggregatePaginate);
+```
+
+Reason:
+
+- Video feeds, search pages, and channel videos can return many records.
+- Pagination prevents sending all videos at once.
+- Aggregation is useful when filtering, sorting, joining owner details, or calculating extra fields.
+- `mongoose-aggregate-paginate-v2` adds an `aggregatePaginate()` method to the `Video` model.
+
+Usage:
+
+```js
+const aggregate = Video.aggregate([
+  {
+    $match: {
+      isPublished: true,
+    },
+  },
+]);
+
+const videos = await Video.aggregatePaginate(aggregate, {
+  page: 1,
+  limit: 10,
+});
+```
+
+The result includes pagination information such as:
+
+- `docs`
+- `totalDocs`
+- `limit`
+- `page`
+- `totalPages`
+- `hasNextPage`
+- `hasPrevPage`
+
+### 17. Improved project separation of concerns
 
 The backend now separates responsibilities across files:
 
@@ -640,16 +852,18 @@ src/
   app.js              Express app and middleware configuration
   index.js            Environment setup, database connection, server startup
   db/index.js         MongoDB connection logic
+  models/             Mongoose schemas and models
   utils/              Reusable helper classes and functions
 ```
 
 Reason:
 
 - Each file has a clear responsibility.
-- The entry point does not become crowded with middleware and utility logic.
-- Utilities can be reused by future controllers, routes, and middleware.
-- This structure is easier to scale as the backend grows.
+- Models own database structure and model methods.
+- Utilities own reusable request, response, and error helpers.
+- The entry point stays focused on bootstrapping the server.
+- This structure is easier to scale as controllers, routes, middleware, and services are added.
 
 ## Current Status
 
-Phase One, Phase Two, and Phase Three are complete. The project now has a production-style folder structure, MongoDB connection setup, Express app configuration, common middleware, and reusable API utility helpers. The next phase can focus on creating models, controllers, routes, and centralized error-handling middleware.
+Phase One, Phase Two, and Phase Three are complete. The project now has a production-style folder structure, MongoDB connection setup, Express app configuration, reusable API utilities, authentication helper methods, and initial User and Video models. The next phase can focus on controllers, routes, centralized error handling, file upload handling, and authentication middleware.
