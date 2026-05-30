@@ -996,6 +996,8 @@ const uploadOnCloudinary = async (localFilePath) => {
     return null;
   }
 };
+
+export default uploadOnCloudinary;
 ```
 
 Reason:
@@ -1013,7 +1015,7 @@ Important implementation note:
 - The environment variable name used in `.env` must exactly match the name used in `process.env`.
 - The standard secret variable name should be `CLOUDINARY_API_SECRET`.
 - If the code uses a misspelled key such as `CLOUDINARY_APT_SECRET`, Cloudinary authentication will fail unless the `.env` file uses the same misspelled name.
-- Before using `uploadOnCloudinary()` inside controllers, export it from `src/utils/cloudinary.js`.
+- `uploadOnCloudinary()` is exported as a default export, so it can be imported into controllers without curly braces.
 
 ### 5. Recommended Cloudinary environment variables
 
@@ -1053,6 +1055,8 @@ Reason:
 Example controller usage:
 
 ```js
+import uploadOnCloudinary from "../utils/cloudinary.js";
+
 const avatarLocalPath = req.file?.path;
 const avatar = await uploadOnCloudinary(avatarLocalPath);
 ```
@@ -1249,8 +1253,234 @@ At the end of Phase Four, the backend has the foundation needed for media upload
 - User and video models already have fields ready to store Cloudinary URLs.
 - Future controllers can now combine Multer, Cloudinary, `ApiError`, and `ApiResponse` to build complete upload workflows.
 
+## Phase Five: User API Route Setup
+
+Phase Five focused on connecting the first real API endpoint. The backend now has a user controller, a user router, and a mounted API path in the main Express app.
+
+This phase does not complete user registration yet. It creates the request pipeline so the next phase can safely add validation, database checks, file uploads, Cloudinary integration, and proper API responses.
+
+### 1. Added the user controller
+
+The user controller file was added here:
+
+```txt
+src/controllers/user.controller.js
+```
+
+Current code:
+
+```js
+import { asyncHandler } from "../utils/asyncHandler.js";
+
+const registerUser = asyncHandler(async (req, res) => {
+  res.status(200).json({
+    message: "ok",
+  });
+});
+
+export { registerUser };
+```
+
+What this does:
+
+- Imports the reusable `asyncHandler` utility.
+- Creates a `registerUser` controller function.
+- Wraps the controller with `asyncHandler` so future async errors can be forwarded properly.
+- Sends a temporary success response with `{ "message": "ok" }`.
+- Exports `registerUser` so the route file can use it.
+
+Reason:
+
+- Controllers should contain request-handling logic.
+- Routes should stay small and only decide which controller should run.
+- Registration will later need async operations such as checking MongoDB, uploading files to Cloudinary, hashing passwords, and creating a user document.
+
+### 2. Added the user router
+
+The user route file was added here:
+
+```txt
+src/routes/user.routes.js
+```
+
+Current code:
+
+```js
+import { Router } from "express";
+import { app } from "../app.js";
+import { registerUser } from "../controllers/user.controller.js";
+
+const router = Router();
+
+router.route("/register").post(registerUser);
+
+export default router;
+```
+
+What this does:
+
+- Imports `Router` from Express.
+- Creates a separate router for user-related endpoints.
+- Imports the `registerUser` controller.
+- Connects `POST /register` to the `registerUser` controller.
+- Exports the router as the default export.
+
+Reason:
+
+- Keeping routes in separate files makes the backend easier to scale.
+- All user endpoints can live inside `user.routes.js`.
+- The route file does not need to know the full API path. It only defines the user-specific part, such as `/register`.
+
+Important note:
+
+- `import { app } from "../app.js";` is not needed in this route file.
+- The router is mounted from `app.js`, so `user.routes.js` only needs `Router` and the controller imports.
+
+Cleaner version:
+
+```js
+import { Router } from "express";
+import { registerUser } from "../controllers/user.controller.js";
+
+const router = Router();
+
+router.route("/register").post(registerUser);
+
+export default router;
+```
+
+### 3. Mounted the user router in app.js
+
+The main Express app now imports the user router:
+
+```js
+import userRouter from "./routes/user.routes.js";
+```
+
+Then it mounts the router:
+
+```js
+app.use("/api/v1/users", userRouter);
+```
+
+What this does:
+
+- Adds a base path for all user routes.
+- Sends requests that start with `/api/v1/users` to `userRouter`.
+- Keeps API versioning in one clear place.
+
+Reason:
+
+- `/api/v1` makes the API version explicit.
+- `/users` groups all user-related endpoints together.
+- Future user routes such as login, logout, refresh token, profile update, and avatar update can be added to the same router.
+
+### 4. Final endpoint created in this phase
+
+The route declared in `user.routes.js` is:
+
+```txt
+POST /register
+```
+
+The base path declared in `app.js` is:
+
+```txt
+/api/v1/users
+```
+
+So the final endpoint becomes:
+
+```txt
+POST /api/v1/users/register
+```
+
+Request flow:
+
+```txt
+POST /api/v1/users/register
+        |
+        v
+app.js matches /api/v1/users
+        |
+        v
+user.routes.js matches /register
+        |
+        v
+registerUser controller runs
+        |
+        v
+Temporary response is returned
+```
+
+Current response:
+
+```json
+{
+  "message": "ok"
+}
+```
+
+### 5. How to test this phase
+
+Start the server:
+
+```bash
+npm run dev
+```
+
+Send a POST request to:
+
+```txt
+http://localhost:8000/api/v1/users/register
+```
+
+Expected response:
+
+```json
+{
+  "message": "ok"
+}
+```
+
+If this response appears, it confirms that:
+
+- The Express app is running.
+- The user router is mounted correctly.
+- The `/register` route is connected.
+- The `registerUser` controller is being called.
+
+### 6. What comes next
+
+The next step is to replace the temporary response with full registration logic.
+
+Expected registration flow:
+
+```txt
+Read username, email, fullName, and password from req.body
+Validate required fields
+Check whether username or email already exists
+Read avatar and coverImage paths from req.files
+Upload images to Cloudinary
+Create the user in MongoDB
+Remove password and refreshToken from the response
+Return a structured ApiResponse
+```
+
+This phase prepares the routing foundation for that flow.
+
+### 7. Phase Five result
+
+At the end of Phase Five:
+
+- `src/controllers/user.controller.js` has the first user controller.
+- `src/routes/user.routes.js` has the first user route.
+- `src/app.js` mounts all user routes under `/api/v1/users`.
+- `POST /api/v1/users/register` is available.
+- The current endpoint returns a temporary test response.
+
 ## Current Status
 
-Phase One, Phase Two, Phase Three, and Phase Four are complete. The project now has a production-style folder structure, MongoDB connection setup, Express app configuration, reusable API utilities, authentication helper methods, initial User and Video models, Multer file upload middleware, and Cloudinary media upload support.
+Phase One, Phase Two, Phase Three, Phase Four, and Phase Five are complete. The project now has a production-style folder structure, MongoDB connection setup, Express app configuration, reusable API utilities, authentication helper methods, initial User and Video models, Multer file upload middleware, Cloudinary media upload support, a user controller, and a mounted user router.
 
-The next phase can focus on controllers, routes, centralized error handling, authentication middleware, user registration, login, logout, token refresh, and connecting uploaded Cloudinary assets with MongoDB documents.
+The next phase can focus on completing user registration by validating request data, checking for existing users, handling avatar and cover image uploads with Multer and Cloudinary, creating the user document, returning an `ApiResponse`, and adding centralized error handling.
