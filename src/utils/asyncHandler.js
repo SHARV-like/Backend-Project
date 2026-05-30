@@ -1,7 +1,11 @@
-const asyncHandler = (requestHandler) => // Higher order function
-    async (req, res, next) => {
-        return Promise.resolve(requestHandler(req,res,next)).catch((error) => next(error));
+const asyncHandler = (requestHandler) => {
+    return async (req, res, next) => {
+        return Promise
+        .resolve(requestHandler(req,res,next))
+        .catch((error) => next(error));
     }
+}
+    
 
 export { asyncHandler }
 
