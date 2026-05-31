@@ -1479,8 +1479,1095 @@ At the end of Phase Five:
 - `POST /api/v1/users/register` is available.
 - The current endpoint returns a temporary test response.
 
+## Phase Six: User Registration Controller
+
+Phase Six focuses on replacing the temporary registration response with real user registration logic. The backend now tries to receive user details, validate required fields, check whether the user already exists, accept avatar and cover image uploads, upload those images to Cloudinary, create the user in MongoDB, remove sensitive fields from the response, and return a structured API response.
+
+This phase connects multiple parts of the backend together:
+
+- `user.routes.js` decides which middleware and controller should run.
+- `multer.middleware.js` reads uploaded files from `multipart/form-data`.
+- `user.controller.js` contains the registration business logic.
+- `user.model.js` defines how the user is saved and hashes the password before saving.
+- `cloudinary.js` uploads local files to Cloudinary.
+- `ApiError` creates consistent failed responses.
+- `ApiResponse` creates consistent successful responses.
+- `asyncHandler` forwards async errors to Express.
+
+### 1. Updated the registration route with Multer
+
+The route now uses `upload.fields()` before the controller:
+
+```js
+router.route("/register").post(
+  upload.fields([
+    {
+      name: "avatar",
+      maxCount: 1,
+    },
+    {
+      name: "coverImage",
+      maxCount: 1,
+    },
+  ]),
+  registerUser
+);
+```
+
+Reason:
+
+- Registration needs text fields such as `username`, `email`, `fullName`, and `password`.
+- Registration also needs image files such as `avatar` and optionally `coverImage`.
+- Normal `express.json()` cannot parse file uploads.
+- `multer` is used because file uploads are usually sent as `multipart/form-data`.
+- `upload.fields()` is used because the request can contain more than one named file field.
+- `avatar` has `maxCount: 1` because one user should have only one profile image.
+- `coverImage` has `maxCount: 1` because one user should have only one cover image.
+- Multer runs before `registerUser`, so the controller can read uploaded files from `req.files`.
+
+### 2. Why `Router()` and `router.route().post()` are used
+
+The route file uses Express Router:
+
+```js
+const router = Router();
+```
+
+Reason:
+
+- `Router()` creates a mini Express router.
+- User-related routes can stay inside `user.routes.js`.
+- The main `app.js` only needs to mount the user router once.
+- This keeps route files organized as the project grows.
+
+The route is declared like this:
+
+```js
+router.route("/register").post(...)
+```
+
+Reason:
+
+- `.route("/register")` groups handlers for the same path.
+- `.post()` means this endpoint accepts HTTP POST requests.
+- POST is used because registration creates a new database record.
+
+The final endpoint is still:
+
+```txt
+POST /api/v1/users/register
+```
+
+Because `app.js` mounts the router here:
+
+```js
+app.use("/api/v1/users", userRouter);
+```
+
+### 3. Updated the registration controller
+
+The controller now follows this larger flow:
+
+```js
+const registerUser = asyncHandler(async (req, res) => {
+  const { username, email, fullName, password } = req.body;
+
+  if ([fullName, email, username, password].some((field) => field?.trim() === "")) {
+    throw new ApiError(400, "All field are required");
+  }
+
+  const existedUser = User.findOne({
+    $or: [{ usernme }, { email }],
+  });
+
+  if (existedUser) {
+    throw new ApiError(409, "User with email or username already exist");
+  }
+
+  const avatarLocalPath = req.files?.avatar[0]?.path;
+  const coverImageLocalPath = req.files?.coverImage[0]?.path;
+
+  if (!avatarLocalPath) {
+    throw new ApiError(400, "Avatar file is required");
+  }
+
+  const avatar = await uploadOnCloudinary(avatarLocalPath);
+  const coverImage = await uploadOnCloudinary(coverImageLocalPath);
+
+  if (!avatar) {
+    throw new ApiError(400, "Avatar is required");
+  }
+
+  const user = await User.create({
+    fullName,
+    avatar: avatar.url,
+    coverImage: coverImage?.url || "",
+    email,
+    password,
+    username: username.toLowerCase(),
+  });
+
+  const createdUser = await User.findById(user._id).select("-password -refreshToken");
+
+  if (!createdUser) {
+    throw new ApiError(500, "Something went wrong while registering the user");
+  }
+
+  return res
+    .status(201)
+    .json(new ApiResponse(200, createdUser, "user registered successfully"));
+});
+```
+
+Reason:
+
+- The controller owns the registration business logic.
+- Routes should not contain validation, database checks, upload logic, or response formatting.
+- Keeping this logic in a controller makes the route easier to read.
+- Wrapping the controller in `asyncHandler` avoids repeating `try...catch` in every async controller.
+
+### 4. Why controller imports are needed
+
+The controller imports these modules:
+
+```js
+import { asyncHandler } from "../utils/asyncHandler.js";
+import { ApiError } from "../utils/ApiError.js";
+import { User } from "../models/user.model.js";
+import uploadOnCloudinary from "../utils/cloudinary.js";
+import ApiResponse from "../utils/ApiResponse.js";
+```
+
+Reason:
+
+- `asyncHandler` catches rejected promises and sends errors to Express through `next(error)`.
+- `ApiError` is used when registration should stop with a clear HTTP error.
+- `User` is the Mongoose model used to search and create users in MongoDB.
+- `uploadOnCloudinary` moves uploaded files from local temp storage to Cloudinary.
+- `ApiResponse` wraps successful responses in a consistent format.
+
+### 5. Reading text fields from `req.body`
+
+The controller reads user details like this:
+
+```js
+const { username, email, fullName, password } = req.body;
+```
+
+Reason:
+
+- `req.body` contains text fields sent by the client.
+- Object destructuring pulls only the required fields from the request body.
+- This keeps the rest of the controller shorter and easier to read.
+
+Advanced syntax explained:
+
+```js
+const { username, email } = req.body;
+```
+
+This means:
+
+```js
+const username = req.body.username;
+const email = req.body.email;
+```
+
+Both versions do the same thing, but destructuring is cleaner when many fields are needed.
+
+### 6. Validating required fields
+
+The controller checks required fields like this:
+
+```js
+if ([fullName, email, username, password].some((field) => field?.trim() === "")) {
+  throw new ApiError(400, "All field are required");
+}
+```
+
+Reason:
+
+- A user should not be created with empty required fields.
+- The array groups all required fields in one place.
+- `.some()` checks whether at least one field fails the condition.
+- `.trim()` removes spaces from the start and end of a string.
+- `field?.trim()` prevents an immediate crash if `field` is `undefined` or `null`.
+- Throwing `ApiError(400, ...)` tells the client the request data is invalid.
+
+Advanced syntax explained:
+
+```js
+[fullName, email, username, password]
+```
+
+This creates an array of all required values.
+
+```js
+.some((field) => field?.trim() === "")
+```
+
+This loops through the array and returns `true` if any field becomes an empty string after trimming.
+
+```js
+field?.trim()
+```
+
+This is optional chaining. It means: call `.trim()` only if `field` exists. If `field` is `null` or `undefined`, JavaScript returns `undefined` instead of throwing an error.
+
+Important note:
+
+- This check catches empty strings like `""` and strings with only spaces like `"   "`.
+- A stronger version should also catch missing fields directly, for example `!field`.
+
+### 7. Checking if the user already exists
+
+The controller checks MongoDB for an existing user:
+
+```js
+const existedUser = User.findOne({
+  $or: [{ usernme }, { email }],
+});
+```
+
+Reason:
+
+- `User.findOne()` searches the users collection for one matching document.
+- A new user should not be allowed to register with an already used username or email.
+- `$or` is a MongoDB query operator.
+- `$or` means either condition can match.
+- If the username already exists, registration should fail.
+- If the email already exists, registration should fail.
+
+Advanced syntax explained:
+
+```js
+$or: [{ username }, { email }]
+```
+
+This means:
+
+```txt
+Find a user where username matches OR email matches.
+```
+
+Recommended corrected version:
+
+```js
+const existedUser = await User.findOne({
+  $or: [{ username }, { email }],
+});
+```
+
+Important implementation note:
+
+- The current controller uses `User.findOne(...)` without `await`.
+- Without `await`, `existedUser` stores a query object instead of the actual database result.
+- The current controller also uses `usernme`, which appears to be a typo for `username`.
+- These should be corrected before testing successful registration.
+
+### 8. Reading uploaded file paths from `req.files`
+
+After Multer runs, uploaded file information is available in `req.files`:
+
+```js
+const avatarLocalPath = req.files?.avatar[0]?.path;
+const coverImageLocalPath = req.files?.coverImage[0]?.path;
+```
+
+Reason:
+
+- Multer stores uploaded files temporarily in `public/temp`.
+- The controller needs the local file path before uploading to Cloudinary.
+- `avatarLocalPath` is required because the user schema requires `avatar`.
+- `coverImageLocalPath` is optional because the user schema does not require `coverImage`.
+
+Advanced syntax explained:
+
+```js
+req.files?.avatar[0]?.path
+```
+
+This reads:
+
+```txt
+From req.files, get avatar, then get the first uploaded avatar file, then get its path.
+```
+
+Recommended safer version:
+
+```js
+const avatarLocalPath = req.files?.avatar?.[0]?.path;
+const coverImageLocalPath = req.files?.coverImage?.[0]?.path;
+```
+
+Reason:
+
+- `avatar?.[0]` safely handles the case where `avatar` is missing.
+- Without the extra `?.`, `req.files?.avatar[0]` can still crash if `avatar` does not exist.
+
+### 9. Requiring an avatar image
+
+The controller stops registration if no avatar file exists:
+
+```js
+if (!avatarLocalPath) {
+  throw new ApiError(400, "Avatar file is required");
+}
+```
+
+Reason:
+
+- The user model has `avatar` as a required field.
+- The app expects every registered user to have a profile image.
+- It is better to fail early before creating a database record with missing profile data.
+
+### 10. Uploading images to Cloudinary
+
+The controller uploads local files:
+
+```js
+const avatar = await uploadOnCloudinary(avatarLocalPath);
+const coverImage = await uploadOnCloudinary(coverImageLocalPath);
+```
+
+Reason:
+
+- Multer only saves files temporarily on the backend server.
+- Cloudinary stores the files permanently and returns a URL.
+- MongoDB should store the Cloudinary URL, not the raw image file.
+- `await` is required because uploading to Cloudinary is asynchronous.
+
+Advanced syntax explained:
+
+```js
+await uploadOnCloudinary(avatarLocalPath)
+```
+
+This means JavaScript pauses this async function until Cloudinary finishes uploading and returns a response.
+
+The controller checks the avatar upload:
+
+```js
+if (!avatar) {
+  throw new ApiError(400, "Avatar is required");
+}
+```
+
+Reason:
+
+- Even if a local avatar file exists, the Cloudinary upload can fail.
+- The user should not be created if the required avatar cannot be uploaded.
+
+### 11. Creating the user in MongoDB
+
+The controller creates the user:
+
+```js
+const user = await User.create({
+  fullName,
+  avatar: avatar.url,
+  coverImage: coverImage?.url || "",
+  email,
+  password,
+  username: username.toLowerCase(),
+});
+```
+
+Reason:
+
+- `User.create()` creates and saves a new user document in MongoDB.
+- `fullName`, `email`, `password`, and `username` come from the request body.
+- `avatar` and `coverImage` come from Cloudinary upload responses.
+- `username.toLowerCase()` keeps usernames consistent.
+- The user model's `pre("save")` hook hashes the password before it is saved.
+
+Advanced syntax explained:
+
+```js
+coverImage: coverImage?.url || ""
+```
+
+This means:
+
+```txt
+If coverImage exists and has a url, use that url.
+Otherwise, save an empty string.
+```
+
+This is useful because cover image upload is optional.
+
+Important note:
+
+- `avatar.url` works, but `avatar.secure_url` is usually better because it uses HTTPS.
+- The same applies to `coverImage?.url`.
+
+### 12. How password hashing happens automatically
+
+The controller sends the plain password to `User.create()`, but the model hashes it before saving:
+
+```js
+userSchema.pre("save", async function (next) {
+  if (!this.isModified("password")) return next();
+
+  this.password = await bcrypt.hash(this.password, 10);
+  next();
+});
+```
+
+Reason:
+
+- Passwords should never be stored as plain text.
+- Mongoose middleware allows password hashing to live in the model instead of the controller.
+- This keeps password protection automatic whenever a user is saved.
+
+Advanced syntax explained:
+
+```js
+function (next) { ... }
+```
+
+A normal function is used here instead of an arrow function because Mongoose sets `this` to the current user document. An arrow function would not have its own `this`.
+
+```js
+this.isModified("password")
+```
+
+This checks whether the password field has changed. If the password did not change, the hook skips hashing to avoid hashing an already hashed password again.
+
+```js
+bcrypt.hash(this.password, 10)
+```
+
+This creates a one-way hashed password. The number `10` is the salt rounds value. Higher numbers are slower but harder to brute force.
+
+### 13. Removing sensitive fields from the response
+
+After creating the user, the controller fetches the user again:
+
+```js
+const createdUser = await User.findById(user._id).select("-password -refreshToken");
+```
+
+Reason:
+
+- The created database document contains sensitive fields.
+- The API response should not send `password` back to the client.
+- The API response should not send `refreshToken` back during registration.
+- `.select("-password -refreshToken")` tells Mongoose to exclude those fields.
+
+Advanced syntax explained:
+
+```js
+.select("-password -refreshToken")
+```
+
+The minus sign means exclude this field from the result.
+
+This:
+
+```txt
+-password -refreshToken
+```
+
+Means:
+
+```txt
+Return all selected user fields except password and refreshToken.
+```
+
+### 14. Checking that the user was created
+
+The controller checks:
+
+```js
+if (!createdUser) {
+  throw new ApiError(500, "Something went wrong while registering the user");
+}
+```
+
+Reason:
+
+- The database write might fail.
+- The user might not be found after creation because of an unexpected issue.
+- `500` means the server failed while processing a valid-looking request.
+
+### 15. Returning the successful response
+
+The controller returns:
+
+```js
+return res.status(201).json(
+  new ApiResponse(200, createdUser, "user registered successfully")
+);
+```
+
+Reason:
+
+- `res.status(201)` sets the HTTP status code.
+- `201` means a new resource was created.
+- `.json()` sends a JSON response.
+- `ApiResponse` keeps the response structure consistent.
+- `createdUser` is sent as the response data.
+
+Expected successful response shape:
+
+```json
+{
+  "statusCode": 200,
+  "data": {
+    "_id": "mongodb-user-id",
+    "username": "sharv",
+    "email": "sharv@example.com",
+    "fullName": "Sharv",
+    "avatar": "https://res.cloudinary.com/...",
+    "coverImage": ""
+  },
+  "message": "user registered successfully",
+  "success": true
+}
+```
+
+Important implementation note:
+
+- The HTTP response status is currently `201`, but `ApiResponse` is created with `200`.
+- For consistency, this should usually be `new ApiResponse(201, createdUser, "user registered successfully")`.
+
+### 16. Successful registration flow
+
+This is the intended successful user registration flow:
+
+```txt
+Client sends POST /api/v1/users/register
+        |
+        v
+Request uses multipart/form-data
+        |
+        v
+app.js forwards /api/v1/users request to userRouter
+        |
+        v
+user.routes.js matches POST /register
+        |
+        v
+Multer upload.fields() reads avatar and coverImage files
+        |
+        v
+Multer stores files temporarily in public/temp
+        |
+        v
+registerUser controller starts
+        |
+        v
+Controller reads username, email, fullName, password from req.body
+        |
+        v
+Controller validates required fields
+        |
+        v
+Controller checks MongoDB for existing username or email
+        |
+        v
+Controller reads avatar and cover image paths from req.files
+        |
+        v
+Controller uploads avatar to Cloudinary
+        |
+        v
+Controller uploads optional cover image to Cloudinary
+        |
+        v
+Controller creates user with User.create()
+        |
+        v
+User model pre-save hook hashes password with bcrypt
+        |
+        v
+MongoDB saves the new user
+        |
+        v
+Controller fetches created user without password and refreshToken
+        |
+        v
+Controller returns 201 response with ApiResponse
+```
+
+Successful result:
+
+- User is saved in MongoDB.
+- Password is stored as a bcrypt hash.
+- Avatar URL is saved from Cloudinary.
+- Cover image URL is saved if uploaded.
+- Response does not expose password or refresh token.
+
+### 17. Unsuccessful registration flows
+
+Registration can fail at multiple points. Each failure should stop the flow and return a clear error.
+
+#### Missing required text fields
+
+Flow:
+
+```txt
+Client sends request
+        |
+        v
+Controller reads req.body
+        |
+        v
+One of fullName, email, username, or password is empty
+        |
+        v
+Controller throws ApiError(400)
+        |
+        v
+User is not created
+```
+
+Reason:
+
+- The request is invalid because required user data is missing.
+- `400 Bad Request` is the correct type of error for invalid input.
+
+#### Username or email already exists
+
+Flow:
+
+```txt
+Client sends request
+        |
+        v
+Controller validates required fields
+        |
+        v
+Controller searches User collection with $or
+        |
+        v
+Existing username or email is found
+        |
+        v
+Controller throws ApiError(409)
+        |
+        v
+User is not created
+```
+
+Reason:
+
+- Duplicate users should not be created.
+- `409 Conflict` is used because the new request conflicts with existing data.
+
+#### Avatar file is missing
+
+Flow:
+
+```txt
+Client sends request without avatar
+        |
+        v
+Multer does not provide req.files.avatar
+        |
+        v
+Controller cannot find avatarLocalPath
+        |
+        v
+Controller throws ApiError(400)
+        |
+        v
+User is not created
+```
+
+Reason:
+
+- The user schema requires an avatar.
+- Registration should stop before database creation.
+
+#### Cloudinary avatar upload fails
+
+Flow:
+
+```txt
+Client sends avatar
+        |
+        v
+Multer saves avatar locally
+        |
+        v
+Controller calls uploadOnCloudinary()
+        |
+        v
+Cloudinary upload fails or returns null
+        |
+        v
+Controller throws ApiError(400)
+        |
+        v
+User is not created
+```
+
+Reason:
+
+- The backend needs a valid hosted image URL before creating the user.
+- Local temp files are not the final storage location.
+
+#### MongoDB user creation fails
+
+Flow:
+
+```txt
+Request passes validation
+        |
+        v
+Images upload successfully
+        |
+        v
+Controller calls User.create()
+        |
+        v
+Database save fails or created user cannot be fetched
+        |
+        v
+Controller throws ApiError(500)
+        |
+        v
+Client receives server error
+```
+
+Reason:
+
+- At this point the request looked valid, but the backend failed internally.
+- `500 Internal Server Error` communicates that the server could not complete the operation.
+
+### 18. Methods and library functions used in this phase
+
+#### `upload.fields()`
+
+Comes from:
+
+```js
+multer
+```
+
+Purpose:
+
+- Reads multiple named file fields from a `multipart/form-data` request.
+- Saves uploaded files locally using the configured Multer storage.
+- Adds file metadata to `req.files`.
+
+#### `cloudinary.uploader.upload()`
+
+Comes from:
+
+```js
+cloudinary
+```
+
+Purpose:
+
+- Uploads a local file to Cloudinary.
+- Returns a response object containing the hosted file URL and metadata.
+- Allows the backend to save a media URL in MongoDB instead of saving raw files.
+
+#### `User.findOne()`
+
+Comes from:
+
+```js
+mongoose
+```
+
+Purpose:
+
+- Searches the users collection for the first document matching the query.
+- Used here to prevent duplicate username or email registration.
+
+#### `$or`
+
+Comes from:
+
+```txt
+MongoDB query operators
+```
+
+Purpose:
+
+- Allows more than one possible match condition.
+- Used here to check `username` OR `email`.
+
+#### `User.create()`
+
+Comes from:
+
+```js
+mongoose
+```
+
+Purpose:
+
+- Creates a new user document.
+- Runs Mongoose validation.
+- Triggers the `pre("save")` password hashing middleware.
+- Saves the document in MongoDB.
+
+#### `User.findById()`
+
+Comes from:
+
+```js
+mongoose
+```
+
+Purpose:
+
+- Finds a user by MongoDB `_id`.
+- Used after creation to fetch the saved user.
+
+#### `.select()`
+
+Comes from:
+
+```js
+mongoose
+```
+
+Purpose:
+
+- Controls which fields are included or excluded in the query result.
+- Used here to remove `password` and `refreshToken` from the response.
+
+#### `bcrypt.hash()`
+
+Comes from:
+
+```js
+bcrypt
+```
+
+Purpose:
+
+- Converts the plain password into a secure hash before storing it.
+- Protects users if the database is ever exposed.
+
+#### `res.status().json()`
+
+Comes from:
+
+```js
+express
+```
+
+Purpose:
+
+- `res.status(code)` sets the HTTP status code.
+- `.json(data)` sends a JSON response to the client.
+- Chaining them keeps response code and response body together.
+
+#### `ApiError`
+
+Comes from:
+
+```txt
+src/utils/ApiError.js
+```
+
+Purpose:
+
+- Gives errors a consistent shape.
+- Stores `statusCode`, `message`, `success: false`, and optional error details.
+- Makes controller failures easier to handle in one central error middleware later.
+
+#### `ApiResponse`
+
+Comes from:
+
+```txt
+src/utils/ApiResponse.js
+```
+
+Purpose:
+
+- Gives successful responses a consistent shape.
+- Stores `statusCode`, `data`, `message`, and `success`.
+- Makes frontend response handling more predictable.
+
+#### `asyncHandler`
+
+Comes from:
+
+```txt
+src/utils/asyncHandler.js
+```
+
+Purpose:
+
+- Wraps async controllers.
+- Converts rejected promises into Express errors through `next(error)`.
+- Avoids writing `try...catch` inside every controller.
+
+### 19. Advanced syntax recap
+
+#### Destructuring
+
+```js
+const { username, email } = req.body;
+```
+
+Meaning:
+
+- Pull `username` and `email` properties out of `req.body`.
+
+#### Optional chaining
+
+```js
+coverImage?.url
+```
+
+Meaning:
+
+- If `coverImage` exists, read `coverImage.url`.
+- If `coverImage` is missing, return `undefined` instead of crashing.
+
+#### Optional array access
+
+```js
+req.files?.avatar?.[0]?.path
+```
+
+Meaning:
+
+- Safely read the first avatar file path only if each previous part exists.
+
+#### Array `.some()`
+
+```js
+[fullName, email, username, password].some((field) => field?.trim() === "")
+```
+
+Meaning:
+
+- Return `true` if at least one field is empty after trimming spaces.
+
+#### Arrow function
+
+```js
+(field) => field?.trim() === ""
+```
+
+Meaning:
+
+- A short function that receives `field` and returns whether it is empty.
+
+#### Logical OR fallback
+
+```js
+coverImage?.url || ""
+```
+
+Meaning:
+
+- Use `coverImage.url` if it exists.
+- Otherwise use an empty string.
+
+#### Method chaining
+
+```js
+res.status(201).json(...)
+```
+
+Meaning:
+
+- Call `status()` first.
+- Then call `json()` on the same response object.
+
+#### Mongoose query chaining
+
+```js
+User.findById(user._id).select("-password -refreshToken");
+```
+
+Meaning:
+
+- Build a query that finds by ID.
+- Modify that query to exclude sensitive fields.
+- `await` runs the query and returns the result.
+
+### 20. Important corrections before testing this phase
+
+The current registration logic is close, but these details should be corrected for the endpoint to work reliably:
+
+```js
+const existedUser = await User.findOne({
+  $or: [{ username }, { email }],
+});
+```
+
+Reason:
+
+- `await` is needed to get the actual database result.
+- `usernme` should be corrected to `username`.
+
+Use safer file path access:
+
+```js
+const avatarLocalPath = req.files?.avatar?.[0]?.path;
+const coverImageLocalPath = req.files?.coverImage?.[0]?.path;
+```
+
+Reason:
+
+- This prevents crashes when optional file fields are missing.
+
+Use matching response status codes:
+
+```js
+return res
+  .status(201)
+  .json(new ApiResponse(201, createdUser, "user registered successfully"));
+```
+
+Reason:
+
+- The HTTP status and response body's `statusCode` should describe the same result.
+
+Prefer Cloudinary secure URLs:
+
+```js
+avatar: avatar.secure_url,
+coverImage: coverImage?.secure_url || "",
+```
+
+Reason:
+
+- `secure_url` uses HTTPS.
+
+Also check the Cloudinary environment variable name in `cloudinary.js`:
+
+```js
+api_secret: process.env.CLOUDINARY_API_SECRET
+```
+
+Reason:
+
+- `CLOUDINARY_APT_SECRET` looks like a spelling mistake.
+- The code and `.env` key must match exactly.
+
+### 21. Phase Six result
+
+At the end of Phase Six, the backend has the intended complete user registration pipeline:
+
+- The user route accepts text fields and image files.
+- Multer stores uploaded files temporarily.
+- The controller validates required fields.
+- The controller checks for duplicate username or email.
+- The controller requires an avatar.
+- Files are uploaded to Cloudinary.
+- User data is saved in MongoDB.
+- The user model hashes the password before saving.
+- Sensitive fields are excluded from the response.
+- Successful responses use `ApiResponse`.
+- Failed flows use `ApiError`.
+
 ## Current Status
 
-Phase One, Phase Two, Phase Three, Phase Four, and Phase Five are complete. The project now has a production-style folder structure, MongoDB connection setup, Express app configuration, reusable API utilities, authentication helper methods, initial User and Video models, Multer file upload middleware, Cloudinary media upload support, a user controller, and a mounted user router.
+Phase One, Phase Two, Phase Three, Phase Four, Phase Five, and Phase Six are documented. The project now has a production-style folder structure, MongoDB connection setup, Express app configuration, reusable API utilities, authentication helper methods, initial User and Video models, Multer file upload middleware, Cloudinary media upload support, a mounted user router, and an intended full user registration controller.
 
-The next phase can focus on completing user registration by validating request data, checking for existing users, handling avatar and cover image uploads with Multer and Cloudinary, creating the user document, returning an `ApiResponse`, and adding centralized error handling.
+Before testing successful registration, apply the corrections listed in Phase Six section 20 so duplicate-user checking, file access, response status codes, and Cloudinary secret configuration work correctly.
