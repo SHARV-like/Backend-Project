@@ -1,3 +1,4 @@
+// higher order function (Promise return)
 const asyncHandler = (requestHandler) => {
     return async (req, res, next) => {
         return Promise
@@ -8,6 +9,7 @@ const asyncHandler = (requestHandler) => {
     
 
 export { asyncHandler }
+
 
 
 
