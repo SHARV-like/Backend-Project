@@ -2566,8 +2566,987 @@ At the end of Phase Six, the backend has the intended complete user registration
 - Successful responses use `ApiResponse`.
 - Failed flows use `ApiError`.
 
+## Phase Seven: Login, Logout, JWT Authentication, and Refresh Tokens
+
+Phase Seven focuses on turning the registered user system into an authentication system. The backend now has login, logout, refresh-token handling, and a reusable JWT verification middleware for protected routes.
+
+This phase connects these files:
+
+```txt
+src/controllers/user.controller.js
+src/routes/user.routes.js
+src/middlewares/auth.middleware.js
+src/models/user.model.js
+src/app.js
+```
+
+Main goal:
+
+- Let an existing user log in with username or email.
+- Compare the entered password with the hashed password in MongoDB.
+- Generate an access token and a refresh token.
+- Send tokens in secure HTTP-only cookies.
+- Store the refresh token in the database.
+- Protect selected routes using `verifyJWT`.
+- Allow access tokens to be regenerated using a valid refresh token.
+- Log the user out by removing the saved refresh token.
+
+### 1. New routes added in this phase
+
+The user router now has these endpoints:
+
+```js
+router.route("/login").post(loginUser);
+
+// secured routes
+router.route("/logout").post(verifyJWT, logoutUser);
+router.route("/refreshToken").post(refreshAccessToken);
+```
+
+Final API endpoints:
+
+```txt
+POST /api/v1/users/login
+POST /api/v1/users/logout
+POST /api/v1/users/refreshToken
+```
+
+Reason:
+
+- `/login` is public because the user does not have a token yet.
+- `/logout` is protected because only a logged-in user should be able to log out their own session.
+- `/refreshToken` is public in route structure because the access token may already be expired, but the controller still validates the refresh token before issuing new tokens.
+
+### 2. Route middleware order
+
+The logout route uses two functions:
+
+```js
+router.route("/logout").post(verifyJWT, logoutUser);
+```
+
+Execution order:
+
+```txt
+Request comes in
+        |
+        v
+verifyJWT runs first
+        |
+        v
+If token is valid, req.user is added
+        |
+        v
+logoutUser runs
+```
+
+Reason:
+
+- `verifyJWT` confirms that the request belongs to a real logged-in user.
+- `logoutUser` can then safely use `req.user._id`.
+- This keeps authentication checking outside the controller.
+
+### 3. Login controller flow
+
+The `loginUser` controller follows this flow:
+
+```txt
+Read email, username, and password from req.body
+        |
+        v
+Require either username or email
+        |
+        v
+Find the user by username or email
+        |
+        v
+Compare password using bcrypt
+        |
+        v
+Generate access token and refresh token
+        |
+        v
+Save refresh token in MongoDB
+        |
+        v
+Remove password and refreshToken from response data
+        |
+        v
+Send cookies and JSON response
+```
+
+Important code:
+
+```js
+const { email, username, password } = req.body;
+
+if (!(username || email)) {
+  throw new ApiError(400, "username or email is required");
+}
+```
+
+Reason:
+
+- Login can work with either username or email.
+- The password is still required later because it is needed for password comparison.
+- `!(username || email)` means both values are missing.
+
+### 4. Finding user by username or email
+
+The login controller uses MongoDB's `$or` operator through Mongoose:
+
+```js
+const user = await User.findOne({
+  $or: [{ username }, { email }],
+});
+```
+
+Meaning:
+
+- Find one user where `username` matches.
+- Or find one user where `email` matches.
+- Return the first matching document.
+
+Reason:
+
+- Users should be able to log in using either identity field.
+- `findOne()` is useful here because username and email are unique in the schema.
+
+Dependency functionality:
+
+- `User.findOne()` comes from Mongoose.
+- `$or` is a MongoDB query operator.
+- `await` is needed because database queries are asynchronous.
+
+### 5. Password checking with bcrypt
+
+The controller checks the password through a custom schema method:
+
+```js
+const isPasswordValid = await user.isPasswordCorrect(password);
+```
+
+The method is defined in `user.model.js`:
+
+```js
+userSchema.methods.isPasswordCorrect = async function (password) {
+  return await bcrypt.compare(password, this.password);
+};
+```
+
+Meaning:
+
+- `password` is the plain password received from the request.
+- `this.password` is the hashed password stored in MongoDB.
+- `bcrypt.compare()` checks whether the plain password matches the hash.
+
+Reason:
+
+- Passwords should never be stored or compared as plain text.
+- `bcrypt.compare()` understands bcrypt hashes and safely performs the comparison.
+- Keeping this as a schema method keeps password logic inside the user model.
+
+Dependency functionality:
+
+- `bcrypt.compare(plainText, hashedValue)` returns `true` or `false`.
+- It is asynchronous, so `await` is used.
+
+### 6. Generating access and refresh tokens
+
+This helper function creates both tokens:
+
+```js
+const generateAccessAndRefreshTokens = async (userId) => {
+  try {
+    const user = await User.findById(userId);
+    const accessToken = await user.generateAccessToken();
+    const refreshToken = await user.generateRefreshToken();
+
+    user.refreshToken = refreshToken;
+    await user.save({ validateBeforeSave: false });
+
+    return { accessToken, refreshToken };
+  } catch (error) {
+    throw new ApiError(
+      500,
+      "Something went wrong while genrating access and refresh tokens"
+    );
+  }
+};
+```
+
+Reason:
+
+- Token creation is needed in both login and refresh-token flows.
+- A helper prevents duplicated code.
+- The refresh token is saved in the user document so the server can later verify whether the incoming refresh token is still the latest valid one.
+
+### 7. Access token method
+
+The access token is generated in the user model:
+
+```js
+userSchema.methods.generateAccessToken = async function () {
+  return await jwt.sign(
+    {
+      _id: this.id,
+      email: this.email,
+      username: this.username,
+      fullName: this.fullName,
+    },
+    process.env.ACCESS_TOKEN_SECRET,
+    {
+      expiresIn: process.env.ACCESS_TOKEN_EXPIRY,
+    }
+  );
+};
+```
+
+Meaning:
+
+- `jwt.sign()` creates a signed token.
+- The first argument is the payload.
+- The second argument is the secret key.
+- The third argument contains token options such as expiry time.
+
+Reason:
+
+- Access tokens are short-lived.
+- They carry enough user identity data for protected requests.
+- The backend can verify the token later without querying by username or email first.
+
+Dependency functionality:
+
+- `jsonwebtoken.sign(payload, secret, options)` creates a JWT.
+- `expiresIn` controls how long the token remains valid.
+- The secret comes from `.env` so it is not hard-coded.
+
+### 8. Refresh token method
+
+The refresh token is also generated in the user model:
+
+```js
+userSchema.methods.generateRefreshToken = async function () {
+  return await jwt.sign(
+    {
+      _id: this.id,
+    },
+    process.env.REFRESH_TOKEN_SECRET,
+    {
+      expiresIn: process.env.REFRESH_TOKEN_EXPIRY,
+    }
+  );
+};
+```
+
+Meaning:
+
+- The refresh token payload only stores the user ID.
+- It uses a different secret from the access token.
+- It can have a longer expiry time.
+
+Reason:
+
+- Refresh tokens should be more limited than access tokens.
+- They are used only to generate a new access token.
+- Separate secrets reduce risk because access-token and refresh-token verification are not interchangeable.
+
+### 9. Saving refresh token without validation
+
+The helper saves the refresh token like this:
+
+```js
+await user.save({ validateBeforeSave: false });
+```
+
+Meaning:
+
+- Save the modified user document.
+- Skip full schema validation for this save operation.
+
+Reason:
+
+- Only `refreshToken` is being updated here.
+- The user already exists and has already passed required registration validation.
+- This avoids unnecessary validation errors from unrelated required fields during token updates.
+
+Dependency functionality:
+
+- `.save()` is a Mongoose document method.
+- `{ validateBeforeSave: false }` is a Mongoose option.
+
+### 10. Removing sensitive fields from the login response
+
+After token generation, the controller fetches a safe user object:
+
+```js
+const loggedInUser = await User.findById(user._id).select(
+  "-password -refreshToken"
+);
+```
+
+Meaning:
+
+- Find the user by ID.
+- Exclude `password`.
+- Exclude `refreshToken`.
+
+Reason:
+
+- The API response should not expose password hashes.
+- The saved refresh token should not be returned as part of the user object.
+- Tokens are already sent separately in cookies and in the response data.
+
+Dependency functionality:
+
+- `.select("-password -refreshToken")` is Mongoose projection syntax.
+- A field prefixed with `-` is excluded from the returned document.
+
+### 11. Sending tokens in cookies
+
+The login controller uses Express response cookies:
+
+```js
+const options = {
+  httpOnly: true,
+  secure: true,
+};
+
+return res
+  .status(200)
+  .cookie("accessToken", accessToken, options)
+  .cookie("refreshToken", refreshToken, options)
+  .json(
+    new ApiResponse(
+      200,
+      {
+        user: loggedInUser,
+        accessToken,
+        refreshToken,
+      },
+      "User Logged In Successfully"
+    )
+  );
+```
+
+Meaning:
+
+- `res.cookie()` sets a cookie in the HTTP response.
+- `accessToken` is stored as one cookie.
+- `refreshToken` is stored as another cookie.
+- `.json()` sends the final API response body.
+
+Reason:
+
+- Cookies allow the browser to automatically send tokens on future requests.
+- `httpOnly: true` prevents frontend JavaScript from reading the cookie.
+- `secure: true` tells the browser to send the cookie only over HTTPS.
+
+Dependency functionality:
+
+- `res.cookie(name, value, options)` comes from Express.
+- Method chaining works because `res.cookie()` returns the response object.
+
+Important development note:
+
+- `secure: true` cookies require HTTPS in the browser.
+- In local HTTP testing, tools like Postman can still show the response, but a browser may not store secure cookies over plain `http://localhost`.
+- For local browser testing, many projects conditionally set `secure` based on `NODE_ENV`.
+
+### 12. Why cookie-parser is needed
+
+The app already uses cookie-parser:
+
+```js
+app.use(cookieParser());
+```
+
+This makes cookies available on:
+
+```js
+req.cookies
+```
+
+Reason:
+
+- Without `cookie-parser`, Express does not automatically parse incoming cookie headers into `req.cookies`.
+- `verifyJWT` needs to read `req.cookies.accessToken`.
+- `refreshAccessToken` needs to read `req.cookies.refreshToken`.
+
+Dependency functionality:
+
+- `cookieParser()` is middleware.
+- It reads the incoming `Cookie` header.
+- It adds a parsed cookies object to the request.
+
+### 13. JWT verification middleware
+
+The protected-route middleware is:
+
+```js
+export const verifyJWT = asyncHandler(async (req, res, next) => {
+  try {
+    const token =
+      req.cookies?.accessToken ||
+      req.header("Authorization")?.replace("Bearer ", "");
+
+    if (!token) {
+      throw new ApiError(401, "Unauthorized request");
+    }
+
+    const decodedToken = jwt.verify(token, process.env.ACCESS_TOKEN_SECRET);
+
+    const user = await User.findById(decodedToken?._id).select(
+      "-password -refreshToken"
+    );
+
+    if (!user) {
+      throw new ApiError(401, "Invalid Access Token");
+    }
+
+    req.user = user;
+    next();
+  } catch (error) {
+    throw new ApiError(401, error?.message || "Invalid access token");
+  }
+});
+```
+
+What this does:
+
+- Reads the access token from cookies first.
+- If no cookie token exists, it checks the `Authorization` header.
+- Verifies the token using the access-token secret.
+- Finds the user from the decoded token ID.
+- Attaches the safe user document to `req.user`.
+- Calls `next()` so the protected controller can continue.
+
+Reason:
+
+- Protected controllers should not repeat token-verification logic.
+- Middleware keeps authentication reusable.
+- Supporting both cookies and `Authorization: Bearer <token>` makes the API easier to test from Postman and frontend apps.
+
+### 14. Authorization header syntax
+
+The middleware supports this header:
+
+```txt
+Authorization: Bearer ACCESS_TOKEN_HERE
+```
+
+This code extracts only the token:
+
+```js
+req.header("Authorization")?.replace("Bearer ", "");
+```
+
+Meaning:
+
+- `req.header("Authorization")` reads a request header.
+- Optional chaining prevents an error if the header is missing.
+- `.replace("Bearer ", "")` removes the `Bearer ` prefix.
+
+Reason:
+
+- JWT APIs commonly use Bearer token syntax.
+- The token verifier needs only the raw token string, not the word `Bearer`.
+
+### 15. Verifying JWT tokens
+
+The middleware verifies the access token with:
+
+```js
+const decodedToken = jwt.verify(token, process.env.ACCESS_TOKEN_SECRET);
+```
+
+The refresh controller verifies the refresh token with:
+
+```js
+const decodedToken = jwt.verify(
+  incomingRefreshToken,
+  process.env.REFRESH_TOKEN_SECRET
+);
+```
+
+Meaning:
+
+- `jwt.verify()` checks whether the token signature is valid.
+- It also checks whether the token has expired.
+- If valid, it returns the decoded payload.
+- If invalid or expired, it throws an error.
+
+Reason:
+
+- Tokens should never be trusted just because they exist.
+- The backend must verify the token using the same secret that signed it.
+- Access tokens and refresh tokens use different secrets.
+
+Dependency functionality:
+
+- `jsonwebtoken.verify(token, secret)` verifies and decodes a JWT.
+- Invalid tokens throw errors, so `try...catch` is used.
+
+### 16. Logout controller
+
+The logout controller currently removes the saved refresh token:
+
+```js
+const logoutUser = asyncHandler(async (req, res) => {
+  await User.findByIdAndUpdate(
+    req.user._id,
+    {
+      $set: {
+        refreshToken: undefined,
+      },
+    },
+    {
+      new: true,
+    }
+  );
+});
+```
+
+Meaning:
+
+- `req.user._id` comes from `verifyJWT`.
+- `findByIdAndUpdate()` finds the logged-in user and updates that document.
+- `$set` changes the `refreshToken` field to `undefined`.
+- `new: true` asks Mongoose to return the updated document.
+
+Reason:
+
+- Removing the stored refresh token invalidates that session's refresh flow.
+- A refresh token should stop working after logout.
+
+Dependency functionality:
+
+- `User.findByIdAndUpdate(id, update, options)` is a Mongoose method.
+- `$set` is a MongoDB update operator.
+- `new: true` returns the updated document instead of the old one.
+
+### 17. Recommended logout completion
+
+The current `logoutUser` function updates the database but does not yet send a response or clear cookies. A complete logout controller should return a response:
+
+```js
+const logoutUser = asyncHandler(async (req, res) => {
+  await User.findByIdAndUpdate(
+    req.user._id,
+    {
+      $unset: {
+        refreshToken: 1,
+      },
+    },
+    {
+      new: true,
+    }
+  );
+
+  const options = {
+    httpOnly: true,
+    secure: true,
+  };
+
+  return res
+    .status(200)
+    .clearCookie("accessToken", options)
+    .clearCookie("refreshToken", options)
+    .json(new ApiResponse(200, {}, "User logged Out"));
+});
+```
+
+Reason:
+
+- HTTP requests must receive a response.
+- Clearing cookies removes tokens from the client.
+- `$unset` is clearer than setting `refreshToken` to `undefined`.
+
+New method functionality:
+
+- `res.clearCookie(name, options)` tells the browser to delete a cookie.
+- `$unset` removes a field from a MongoDB document.
+
+### 18. Refresh access token flow
+
+The refresh controller follows this flow:
+
+```txt
+Read refresh token from cookies or req.body
+        |
+        v
+Reject request if token is missing
+        |
+        v
+Verify refresh token using REFRESH_TOKEN_SECRET
+        |
+        v
+Find user from decoded token ID
+        |
+        v
+Compare incoming token with saved database token
+        |
+        v
+Generate new access and refresh tokens
+        |
+        v
+Send new cookies and response
+```
+
+Important code:
+
+```js
+const incomingRefreshToken =
+  req.cookies.refreshToken || req.body.refreshToken;
+```
+
+Reason:
+
+- Browser clients can send refresh tokens through cookies.
+- API clients like Postman can send refresh tokens in the request body.
+- The controller supports both styles.
+
+### 19. Refresh token database comparison
+
+The refresh controller checks:
+
+```js
+if (incomingRefreshToken !== user.refreshToken) {
+  throw new ApiError(401, "Refresh Token is expired or used");
+}
+```
+
+Reason:
+
+- A valid JWT signature alone is not enough.
+- The token must also match the latest refresh token saved for that user.
+- When a new refresh token is generated, the older one should no longer be accepted.
+
+This pattern helps with refresh token rotation:
+
+```txt
+Login creates refresh token A
+Refresh token A is used
+Server creates refresh token B
+Refresh token A should now fail
+Refresh token B becomes the latest valid token
+```
+
+### 20. Recommended refresh cookie correction
+
+The current refresh controller defines cookie options:
+
+```js
+const options = {
+  httpOnly: true,
+  secure: true,
+};
+```
+
+But the cookies are currently set without passing those options:
+
+```js
+.cookie("accessToken", accessToken)
+.cookie("refreshToken", refreshToken)
+```
+
+Recommended version:
+
+```js
+return res
+  .status(200)
+  .cookie("accessToken", accessToken, options)
+  .cookie("refreshToken", refreshToken, options)
+  .json(
+    new ApiResponse(
+      200,
+      { accessToken, refreshToken },
+      "Access Token Refreshed"
+    )
+  );
+```
+
+Reason:
+
+- Login and refresh should set cookies consistently.
+- Refresh-token cookies should also be `httpOnly`.
+- Cookie security should not become weaker after refreshing tokens.
+
+### 21. Important JavaScript syntax used in this phase
+
+#### Destructuring
+
+```js
+const { email, username, password } = req.body;
+```
+
+Meaning:
+
+- Pull selected properties from `req.body`.
+- Create variables with the same names.
+
+#### Logical OR
+
+```js
+const token = req.cookies?.accessToken || req.header("Authorization");
+```
+
+Meaning:
+
+- Use the cookie token if it exists.
+- Otherwise use the authorization header value.
+
+#### Optional chaining
+
+```js
+req.cookies?.accessToken
+decodedToken?._id
+error?.message
+```
+
+Meaning:
+
+- Safely access nested values.
+- If the left side is `null` or `undefined`, the expression returns `undefined` instead of crashing.
+
+#### Object shorthand
+
+```js
+return { accessToken, refreshToken };
+```
+
+Meaning:
+
+- Same as `{ accessToken: accessToken, refreshToken: refreshToken }`.
+
+#### Method chaining
+
+```js
+return res
+  .status(200)
+  .cookie("accessToken", accessToken, options)
+  .cookie("refreshToken", refreshToken, options)
+  .json(...);
+```
+
+Meaning:
+
+- Each response method returns the response object.
+- This allows multiple response operations to be chained neatly.
+
+#### Middleware `next()`
+
+```js
+next();
+```
+
+Meaning:
+
+- Move control to the next middleware or controller.
+
+Reason:
+
+- Without `next()`, the request would stop inside `verifyJWT`.
+
+#### Try/catch with asyncHandler
+
+```js
+try {
+  const decodedToken = jwt.verify(token, process.env.ACCESS_TOKEN_SECRET);
+} catch (error) {
+  throw new ApiError(401, error?.message || "Invalid access token");
+}
+```
+
+Meaning:
+
+- `jwt.verify()` can throw errors.
+- `try...catch` converts those errors into a clean `ApiError`.
+- `asyncHandler` forwards the thrown `ApiError` to Express error handling.
+
+### 22. Dependency methods introduced or used deeply in this phase
+
+#### jsonwebtoken
+
+```js
+jwt.sign(payload, secret, options);
+jwt.verify(token, secret);
+```
+
+Functionality:
+
+- `sign()` creates access and refresh tokens.
+- `verify()` checks token validity and returns decoded payload data.
+- JWT expiry is controlled with `expiresIn`.
+
+#### cookie-parser
+
+```js
+app.use(cookieParser());
+req.cookies.accessToken;
+req.cookies.refreshToken;
+```
+
+Functionality:
+
+- Parses the request's cookie header.
+- Makes cookie values readable from `req.cookies`.
+
+#### Express response cookies
+
+```js
+res.cookie("accessToken", accessToken, options);
+res.clearCookie("accessToken", options);
+```
+
+Functionality:
+
+- `cookie()` sends a cookie to the client.
+- `clearCookie()` asks the client to remove a cookie.
+
+#### Mongoose query and document methods
+
+```js
+User.findOne({ $or: [{ username }, { email }] });
+User.findById(userId);
+User.findByIdAndUpdate(id, update, options);
+user.save({ validateBeforeSave: false });
+.select("-password -refreshToken");
+```
+
+Functionality:
+
+- `findOne()` finds a single matching document.
+- `findById()` finds a document using `_id`.
+- `findByIdAndUpdate()` updates a document by `_id`.
+- `.save()` persists changes on a document instance.
+- `.select()` controls which fields are returned.
+
+#### bcrypt
+
+```js
+bcrypt.compare(password, this.password);
+```
+
+Functionality:
+
+- Compares a plain password with a hashed password.
+- Returns a boolean.
+
+### 23. Postman testing guide for this phase
+
+#### Login
+
+Endpoint:
+
+```txt
+POST http://localhost:8000/api/v1/users/login
+```
+
+Body:
+
+```json
+{
+  "email": "user@example.com",
+  "password": "user-password"
+}
+```
+
+Or:
+
+```json
+{
+  "username": "user123",
+  "password": "user-password"
+}
+```
+
+Expected result:
+
+- Response status `200`.
+- Response contains `user`, `accessToken`, and `refreshToken`.
+- Cookies include `accessToken` and `refreshToken`.
+
+#### Logout
+
+Endpoint:
+
+```txt
+POST http://localhost:8000/api/v1/users/logout
+```
+
+Send either:
+
+```txt
+Cookie: accessToken=ACCESS_TOKEN_HERE
+```
+
+Or:
+
+```txt
+Authorization: Bearer ACCESS_TOKEN_HERE
+```
+
+Expected result after applying the recommended logout completion:
+
+- Response status `200`.
+- Database refresh token is removed.
+- Cookies are cleared.
+
+#### Refresh token
+
+Endpoint:
+
+```txt
+POST http://localhost:8000/api/v1/users/refreshToken
+```
+
+Send either a cookie:
+
+```txt
+Cookie: refreshToken=REFRESH_TOKEN_HERE
+```
+
+Or body:
+
+```json
+{
+  "refreshToken": "REFRESH_TOKEN_HERE"
+}
+```
+
+Expected result:
+
+- Response status `200`.
+- New access token is generated.
+- New refresh token is generated.
+- Saved refresh token in MongoDB is updated.
+
+### 24. Phase Seven result
+
+At the end of Phase Seven, the backend has the core authentication flow:
+
+- Users can log in with username or email.
+- Passwords are checked using bcrypt.
+- Access tokens and refresh tokens are generated using JWT.
+- Refresh tokens are stored in MongoDB.
+- Tokens are sent to clients through cookies.
+- `cookie-parser` reads tokens from incoming cookies.
+- `verifyJWT` protects routes.
+- Protected controllers can use `req.user`.
+- Access tokens can be refreshed using valid refresh tokens.
+- Logout can invalidate refresh tokens on the server side.
+
+Before treating this phase as fully complete, apply the recommended logout response and refresh cookie corrections from sections 17 and 20.
+
 ## Current Status
 
-Phase One, Phase Two, Phase Three, Phase Four, Phase Five, and Phase Six are documented. The project now has a production-style folder structure, MongoDB connection setup, Express app configuration, reusable API utilities, authentication helper methods, initial User and Video models, Multer file upload middleware, Cloudinary media upload support, a mounted user router, and an intended full user registration controller.
+Phase One through Phase Seven are documented. The project now has a production-style folder structure, MongoDB connection setup, Express app configuration, reusable API utilities, User and Video models, Multer file upload middleware, Cloudinary media upload support, user registration, login, JWT verification middleware, refresh-token handling, and protected logout routing.
 
-Before testing successful registration, apply the corrections listed in Phase Six section 20 so duplicate-user checking, file access, response status codes, and Cloudinary secret configuration work correctly.
+Remaining corrections before complete auth testing:
+
+- Complete `logoutUser` by clearing cookies and returning an `ApiResponse`.
+- Pass cookie options when setting refreshed access and refresh tokens.
+- Remove the unused `import { app } from "../app.js";` from `src/routes/user.routes.js`.
+- Prefer matching response status codes, such as `new ApiResponse(201, ...)` for successful registration.
+- Consider using Cloudinary `secure_url` values for stored media URLs.
