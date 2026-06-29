@@ -539,6 +539,8 @@ class ApiResponse {
     this.success = statusCode < 400;
   }
 }
+
+export default ApiResponse;
 ```
 
 Reason:
@@ -990,6 +992,7 @@ const uploadOnCloudinary = async (localFilePath) => {
     });
 
     console.log("file is uploaded on cloudinary ", response.url);
+    fs.unlinkSync(localFilePath);
     return response;
   } catch (error) {
     fs.unlinkSync(localFilePath);
@@ -1008,6 +1011,7 @@ Reason:
 - `cloudinary.uploader.upload()` uploads the file to Cloudinary.
 - `resource_type: "auto"` allows Cloudinary to automatically detect whether the file is an image, video, or another supported asset type.
 - The Cloudinary response includes useful information such as the file URL, public ID, resource type, format, size, and duration for videos.
+- After a successful upload, the temporary local file is removed using `fs.unlinkSync()`.
 - If the upload fails, the temporary local file is removed using `fs.unlinkSync()`.
 
 Important implementation note:
@@ -1576,16 +1580,16 @@ const registerUser = asyncHandler(async (req, res) => {
     throw new ApiError(400, "All field are required");
   }
 
-  const existedUser = User.findOne({
-    $or: [{ usernme }, { email }],
+  const existedUser = await User.findOne({
+    $or: [{ username }, { email }],
   });
 
   if (existedUser) {
     throw new ApiError(409, "User with email or username already exist");
   }
 
-  const avatarLocalPath = req.files?.avatar[0]?.path;
-  const coverImageLocalPath = req.files?.coverImage[0]?.path;
+  const avatarLocalPath = req.files?.avatar?.[0]?.path;
+  const coverImageLocalPath = req.files?.coverImage?.[0]?.path;
 
   if (!avatarLocalPath) {
     throw new ApiError(400, "Avatar file is required");
@@ -1725,7 +1729,7 @@ The controller checks MongoDB for an existing user:
 
 ```js
 const existedUser = User.findOne({
-  $or: [{ usernme }, { email }],
+  $or: [{ username }, { email }],
 });
 ```
 
@@ -1750,7 +1754,7 @@ This means:
 Find a user where username matches OR email matches.
 ```
 
-Recommended corrected version:
+Current corrected version:
 
 ```js
 const existedUser = await User.findOne({
@@ -1760,18 +1764,16 @@ const existedUser = await User.findOne({
 
 Important implementation note:
 
-- The current controller uses `User.findOne(...)` without `await`.
-- Without `await`, `existedUser` stores a query object instead of the actual database result.
-- The current controller also uses `usernme`, which appears to be a typo for `username`.
-- These should be corrected before testing successful registration.
+- The controller now uses `await`, so `existedUser` stores the actual database result.
+- The duplicate lookup now uses `username`, not the earlier typo `usernme`.
 
 ### 8. Reading uploaded file paths from `req.files`
 
 After Multer runs, uploaded file information is available in `req.files`:
 
 ```js
-const avatarLocalPath = req.files?.avatar[0]?.path;
-const coverImageLocalPath = req.files?.coverImage[0]?.path;
+const avatarLocalPath = req.files?.avatar?.[0]?.path;
+const coverImageLocalPath = req.files?.coverImage?.[0]?.path;
 ```
 
 Reason:
@@ -1784,7 +1786,7 @@ Reason:
 Advanced syntax explained:
 
 ```js
-req.files?.avatar[0]?.path
+req.files?.avatar?.[0]?.path
 ```
 
 This reads:
@@ -1793,7 +1795,7 @@ This reads:
 From req.files, get avatar, then get the first uploaded avatar file, then get its path.
 ```
 
-Recommended safer version:
+Current safer version:
 
 ```js
 const avatarLocalPath = req.files?.avatar?.[0]?.path;
@@ -1803,7 +1805,7 @@ const coverImageLocalPath = req.files?.coverImage?.[0]?.path;
 Reason:
 
 - `avatar?.[0]` safely handles the case where `avatar` is missing.
-- Without the extra `?.`, `req.files?.avatar[0]` can still crash if `avatar` does not exist.
+- Without the extra `?.`, older code like `req.files?.avatar[0]` can still crash if `avatar` does not exist.
 
 ### 9. Requiring an avatar image
 
@@ -2492,7 +2494,7 @@ Meaning:
 
 ### 20. Important corrections before testing this phase
 
-The current registration logic is close, but these details should be corrected for the endpoint to work reliably:
+The registration logic now includes the important database lookup and safe file-access corrections:
 
 ```js
 const existedUser = await User.findOne({
@@ -2500,12 +2502,12 @@ const existedUser = await User.findOne({
 });
 ```
 
-Reason:
+Confirmed:
 
 - `await` is needed to get the actual database result.
-- `usernme` should be corrected to `username`.
+- `username` is now spelled correctly in the duplicate-user lookup.
 
-Use safer file path access:
+The controller also uses safer file path access:
 
 ```js
 const avatarLocalPath = req.files?.avatar?.[0]?.path;
@@ -2516,7 +2518,7 @@ Reason:
 
 - This prevents crashes when optional file fields are missing.
 
-Use matching response status codes:
+Remaining recommended registration cleanup:
 
 ```js
 return res
@@ -3089,7 +3091,7 @@ Dependency functionality:
 
 ### 16. Logout controller
 
-The logout controller currently removes the saved refresh token:
+The logout controller now removes the saved refresh token, clears auth cookies, and returns a response:
 
 ```js
 const logoutUser = asyncHandler(async (req, res) => {
@@ -3098,44 +3100,6 @@ const logoutUser = asyncHandler(async (req, res) => {
     {
       $set: {
         refreshToken: undefined,
-      },
-    },
-    {
-      new: true,
-    }
-  );
-});
-```
-
-Meaning:
-
-- `req.user._id` comes from `verifyJWT`.
-- `findByIdAndUpdate()` finds the logged-in user and updates that document.
-- `$set` changes the `refreshToken` field to `undefined`.
-- `new: true` asks Mongoose to return the updated document.
-
-Reason:
-
-- Removing the stored refresh token invalidates that session's refresh flow.
-- A refresh token should stop working after logout.
-
-Dependency functionality:
-
-- `User.findByIdAndUpdate(id, update, options)` is a Mongoose method.
-- `$set` is a MongoDB update operator.
-- `new: true` returns the updated document instead of the old one.
-
-### 17. Recommended logout completion
-
-The current `logoutUser` function updates the database but does not yet send a response or clear cookies. A complete logout controller should return a response:
-
-```js
-const logoutUser = asyncHandler(async (req, res) => {
-  await User.findByIdAndUpdate(
-    req.user._id,
-    {
-      $unset: {
-        refreshToken: 1,
       },
     },
     {
@@ -3152,20 +3116,51 @@ const logoutUser = asyncHandler(async (req, res) => {
     .status(200)
     .clearCookie("accessToken", options)
     .clearCookie("refreshToken", options)
-    .json(new ApiResponse(200, {}, "User logged Out"));
+    .json(new ApiResponse(200, {}, "User Logged Out"));
 });
+```
+
+Meaning:
+
+- `req.user._id` comes from `verifyJWT`.
+- `findByIdAndUpdate()` finds the logged-in user and updates that document.
+- `$set` changes the `refreshToken` field to `undefined`.
+- `new: true` asks Mongoose to return the updated document.
+- `clearCookie()` asks the browser or API client to remove the token cookies.
+- `ApiResponse` sends a consistent successful logout response.
+
+Reason:
+
+- Removing the stored refresh token invalidates that session's refresh flow.
+- A refresh token should stop working after logout.
+- HTTP requests must receive a response, even when the main work is deleting server/client auth state.
+
+Dependency functionality:
+
+- `User.findByIdAndUpdate(id, update, options)` is a Mongoose method.
+- `$set` is a MongoDB update operator.
+- `new: true` returns the updated document instead of the old one.
+- `res.clearCookie(name, options)` tells the client to remove a cookie.
+
+### 17. Logout completion status
+
+The previous missing logout response has now been added. The current implementation uses `$set` with `refreshToken: undefined`:
+
+```js
+$set: {
+  refreshToken: undefined,
+}
 ```
 
 Reason:
 
-- HTTP requests must receive a response.
-- Clearing cookies removes tokens from the client.
-- `$unset` is clearer than setting `refreshToken` to `undefined`.
+- This invalidates the saved refresh token for the logged-in user.
+- The route returns `200` and clears both `accessToken` and `refreshToken` cookies.
 
-New method functionality:
+Optional future cleanup:
 
-- `res.clearCookie(name, options)` tells the browser to delete a cookie.
 - `$unset` removes a field from a MongoDB document.
+- `$unset: { refreshToken: 1 }` is a clearer database update if the goal is to remove the field entirely instead of setting it to `undefined`.
 
 ### 18. Refresh access token flow
 
@@ -3232,7 +3227,7 @@ Refresh token A should now fail
 Refresh token B becomes the latest valid token
 ```
 
-### 20. Recommended refresh cookie correction
+### 20. Refresh cookie correction
 
 The current refresh controller defines cookie options:
 
@@ -3250,7 +3245,7 @@ But the cookies are currently set without passing those options:
 .cookie("refreshToken", refreshToken)
 ```
 
-Recommended version:
+The options should be passed into both refreshed cookies:
 
 ```js
 return res
@@ -3487,10 +3482,10 @@ Or:
 Authorization: Bearer ACCESS_TOKEN_HERE
 ```
 
-Expected result after applying the recommended logout completion:
+Expected result:
 
 - Response status `200`.
-- Database refresh token is removed.
+- Database refresh token is invalidated.
 - Cookies are cleared.
 
 #### Refresh token
@@ -3535,18 +3530,43 @@ At the end of Phase Seven, the backend has the core authentication flow:
 - `verifyJWT` protects routes.
 - Protected controllers can use `req.user`.
 - Access tokens can be refreshed using valid refresh tokens.
-- Logout can invalidate refresh tokens on the server side.
+- Logout invalidates the saved refresh token, clears auth cookies, and returns a success response.
 
-Before treating this phase as fully complete, apply the recommended logout response and refresh cookie corrections from sections 17 and 20.
+Before treating this phase as fully complete, apply the refresh cookie correction from section 20.
 
 ## Current Status
 
-Phase One through Phase Seven are documented. The project now has a production-style folder structure, MongoDB connection setup, Express app configuration, reusable API utilities, User and Video models, Multer file upload middleware, Cloudinary media upload support, user registration, login, JWT verification middleware, refresh-token handling, and protected logout routing.
+Phase One through Phase Seven are documented. The project now has a production-style folder structure, MongoDB connection setup, Express app configuration, reusable API utilities, User, Video, and Subscription models, Multer file upload middleware, Cloudinary media upload support, user registration, login, JWT verification middleware, refresh-token handling, and protected logout routing.
 
-Remaining corrections before complete auth testing:
+Current user routes:
 
-- Complete `logoutUser` by clearing cookies and returning an `ApiResponse`.
+```txt
+POST /api/v1/users/register
+POST /api/v1/users/login
+POST /api/v1/users/logout
+POST /api/v1/users/refreshToken
+```
+
+Current route behavior:
+
+- `register` uses `upload.fields()` to accept `avatar` and `coverImage`.
+- `login` accepts `username` or `email` with `password`.
+- `logout` is protected by `verifyJWT`.
+- `refreshToken` accepts the refresh token from cookies or request body.
+
+Current controller state:
+
+- `registerUser` validates required fields, checks duplicate username/email, uploads images to Cloudinary, creates the user, and excludes `password` and `refreshToken` from the response.
+- `loginUser` verifies credentials, generates access and refresh tokens, stores the refresh token, sets auth cookies, and returns the safe user object.
+- `logoutUser` clears auth cookies, invalidates the saved refresh token, and returns an `ApiResponse`.
+- `refreshAccessToken` verifies the incoming refresh token, compares it with the stored token, rotates tokens, and returns the new token pair.
+- `changeCurrentPassword` and `getCurrentUser` have been started in `user.controller.js`, but they are not exported or connected to routes yet.
+
+Remaining cleanup before complete auth testing:
+
 - Pass cookie options when setting refreshed access and refresh tokens.
 - Remove the unused `import { app } from "../app.js";` from `src/routes/user.routes.js`.
 - Prefer matching response status codes, such as `new ApiResponse(201, ...)` for successful registration.
 - Consider using Cloudinary `secure_url` values for stored media URLs.
+- Check the Cloudinary secret environment key: `CLOUDINARY_APT_SECRET` in `cloudinary.js` should match the actual `.env` key, and `CLOUDINARY_API_SECRET` is the clearer intended name.
+- Export and route `changeCurrentPassword` and `getCurrentUser` only after their response behavior is complete.

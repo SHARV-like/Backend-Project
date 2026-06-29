@@ -152,6 +152,17 @@ const logoutUser = asyncHandler(async (req,res) => {
             new : true // returned response mein new updated value milegi i.e. refreshToken : undefined, naa ki old refreshToken 
         }
     )
+
+    const options = {
+        httpOnly: true,
+        secure: true
+    }
+
+    return res
+    .status(200)
+    .clearCookie("accessToken", options)
+    .clearCookie("refreshToken", options)
+    .json(new ApiResponse(200, {}, "User Logged Out"));
 })
 
 const refreshAccessToken = asyncHandler(async (req,res) => {
@@ -198,6 +209,32 @@ const refreshAccessToken = asyncHandler(async (req,res) => {
     } catch (error) {
         throw new ApiError(401, error?.message || "Invalid refresh token");
     }
+})
+
+const changeCurrentPassword = asyncHandler(async(req,res) => {
+    const {oldPassword, newPassword} = req.body;
+    const user = await User.findById(req.user?._id);
+
+    const isPasswordCorrect = await user.isPasswordCorrect(oldPassword);
+
+    if(!isPasswordCorrect){
+        throw new ApiError(400, "Incorrect Password");
+    }
+
+    user.password = newPassword;
+
+    await user.save({validateBeforeSave: false});
+
+    return res
+    .status(200)
+    .json(new ApiResponse(200, {}, "Password changed successfully"))
+})
+
+const getCurrentUser = asyncHandler(async(req,res) => {
+    const currentUser = req.user;
+    return res
+    .status(200)
+    .json()
 })
 export {
     registerUser,
