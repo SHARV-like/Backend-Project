@@ -3534,9 +3534,285 @@ At the end of Phase Seven, the backend has the core authentication flow:
 
 Before treating this phase as fully complete, apply the refresh cookie correction from section 20.
 
+## Phase Eight: Account and Profile Controller Methods
+
+Phase Eight started the protected account-management controller methods. These methods build on the JWT middleware from Phase Seven, because they use `req.user` to identify the currently logged-in user.
+
+### 1. Exported additional user controller methods
+
+The `src/controllers/user.controller.js` file now exports these additional controller methods:
+
+```js
+changeCurrentPassword,
+getCurrentUser,
+updateAccountDetails,
+updateUserAvatar,
+updateCoverImage
+```
+
+Reason:
+
+- These handlers will be used for logged-in user account actions.
+- Exporting them makes them available for route registration.
+- Keeping them in the user controller keeps user account logic in one place.
+
+### 2. Added current password change controller
+
+The `changeCurrentPassword` controller reads the old password and new password from the request body:
+
+```js
+const { oldPassword, newPassword } = req.body;
+const user = await User.findById(req.user?._id);
+```
+
+It checks the old password using the model method:
+
+```js
+const isPasswordCorrect = await user.isPasswordCorrect(oldPassword);
+```
+
+If the old password is correct, it updates the password:
+
+```js
+user.password = newPassword;
+await user.save({ validateBeforeSave: false });
+```
+
+Reason:
+
+- The route should only allow a logged-in user to change their own password.
+- `req.user?._id` comes from the `verifyJWT` middleware.
+- `isPasswordCorrect()` uses bcrypt comparison from the user model.
+- Saving the user document triggers the existing password hashing hook.
+
+Expected route behavior when connected:
+
+```txt
+POST /api/v1/users/change-password
+```
+
+Expected request body:
+
+```json
+{
+  "oldPassword": "current-password",
+  "newPassword": "new-password"
+}
+```
+
+### 3. Started current user controller
+
+The `getCurrentUser` controller has been started:
+
+```js
+const getCurrentUser = asyncHandler(async (req, res) => {
+  const currentUser = req.user;
+  return res.status(200).json();
+});
+```
+
+Reason:
+
+- Protected routes can access the logged-in user through `req.user`.
+- This controller should return the current authenticated user's safe profile data.
+
+Current status:
+
+- The controller is exported.
+- The controller is not connected to a route yet.
+- The response body still needs to return an `ApiResponse`.
+
+Expected final response shape:
+
+```js
+return res
+  .status(200)
+  .json(new ApiResponse(200, currentUser, "Current user fetched successfully"));
+```
+
+### 4. Added account detail update controller
+
+The `updateAccountDetails` controller updates the current user's `fullName` and `email`:
+
+```js
+const { fullName, email } = req.body;
+```
+
+It validates that both fields are present:
+
+```js
+if (!fullName || !email) {
+  throw new ApiError(400, "All fields are required");
+}
+```
+
+Then it updates the logged-in user:
+
+```js
+const user = User.findByIdAndUpdate(
+  req.user?._id,
+  {
+    $set: {
+      fullName,
+      email,
+    },
+  },
+  { new: true }
+).select("-password");
+```
+
+Reason:
+
+- Profile text fields can be updated without uploading files.
+- The controller uses `req.user?._id`, so it should be protected by `verifyJWT`.
+- The returned user excludes the password field.
+
+Important correction before routing:
+
+```js
+const user = await User.findByIdAndUpdate(...)
+```
+
+Reason:
+
+- Without `await`, `user` is a query object instead of the updated user document.
+
+Expected route behavior when connected:
+
+```txt
+PATCH /api/v1/users/update-account
+```
+
+### 5. Added avatar update controller
+
+The `updateUserAvatar` controller reads a single uploaded file from `req.file`:
+
+```js
+const avatarLocalPath = req.file?.path;
+```
+
+It validates that the file exists, uploads it to Cloudinary, and updates the user's avatar URL:
+
+```js
+const avatar = await uploadOnCloudinary(avatarLocalPath);
+
+const user = await User.findByIdAndUpdate(
+  req.user?._id,
+  {
+    $set: {
+      avatar: avatar.url,
+    },
+  },
+  { new: true }
+).select("-password");
+```
+
+Reason:
+
+- Avatar updates require file upload handling.
+- `upload.single("avatar")` should be used when this controller is connected to a route.
+- Cloudinary stores the image and MongoDB stores only the image URL.
+
+Expected route behavior when connected:
+
+```txt
+PATCH /api/v1/users/avatar
+```
+
+Expected form-data field:
+
+```txt
+avatar: <image-file>
+```
+
+### 6. Added cover image update controller
+
+The `updateCoverImage` controller works like the avatar update controller, but updates the `coverImage` field:
+
+```js
+const coverImageLocalPath = req.file?.path;
+const coverImage = await uploadOnCloudinary(coverImageLocalPath);
+```
+
+It saves the new Cloudinary URL:
+
+```js
+const user = await User.findByIdAndUpdate(
+  req.user?._id,
+  {
+    $set: {
+      coverImage: coverImage.url,
+    },
+  },
+  { new: true }
+).select("-password");
+```
+
+Reason:
+
+- Cover image updates are separate from avatar updates.
+- This keeps each file-upload route focused on one image field.
+- The controller can reuse the same Multer and Cloudinary utilities.
+
+Expected route behavior when connected:
+
+```txt
+PATCH /api/v1/users/cover-image
+```
+
+Expected form-data field:
+
+```txt
+coverImage: <image-file>
+```
+
+### 7. Route connection status
+
+The additional controller methods are exported, but the current router only connects:
+
+```txt
+POST /api/v1/users/register
+POST /api/v1/users/login
+POST /api/v1/users/logout
+POST /api/v1/users/refreshToken
+```
+
+The new protected account routes still need to be imported and registered in `src/routes/user.routes.js`.
+
+Expected future route setup:
+
+```js
+router.route("/change-password").post(verifyJWT, changeCurrentPassword);
+router.route("/current-user").get(verifyJWT, getCurrentUser);
+router.route("/update-account").patch(verifyJWT, updateAccountDetails);
+router.route("/avatar").patch(verifyJWT, upload.single("avatar"), updateUserAvatar);
+router
+  .route("/cover-image")
+  .patch(verifyJWT, upload.single("coverImage"), updateCoverImage);
+```
+
+Reason:
+
+- Password, account, avatar, and cover image updates should only work for authenticated users.
+- `verifyJWT` must run before controllers that depend on `req.user`.
+- Multer must run before image controllers that depend on `req.file`.
+
+### 8. Phase Eight result
+
+At the end of Phase Eight, the user controller has started account and profile management support:
+
+- Logged-in users can change their password once the route is connected.
+- The current-user handler has been started and exported.
+- Logged-in users can update `fullName` and `email` once the route is connected.
+- Logged-in users can update avatar and cover image files once the routes are connected.
+- Avatar and cover image updates reuse the existing Multer and Cloudinary setup.
+- The new controller methods are exported from `user.controller.js`.
+
+Before treating this phase as complete, finish the `getCurrentUser` response, add `await` in `updateAccountDetails`, import the new handlers in `user.routes.js`, and register the protected routes.
+
 ## Current Status
 
-Phase One through Phase Seven are documented. The project now has a production-style folder structure, MongoDB connection setup, Express app configuration, reusable API utilities, User, Video, and Subscription models, Multer file upload middleware, Cloudinary media upload support, user registration, login, JWT verification middleware, refresh-token handling, and protected logout routing.
+Phase One through Phase Eight are documented. The project now has a production-style folder structure, MongoDB connection setup, Express app configuration, reusable API utilities, User, Video, and Subscription models, Multer file upload middleware, Cloudinary media upload support, user registration, login, JWT verification middleware, refresh-token handling, protected logout routing, and started account/profile controller methods.
 
 Current user routes:
 
@@ -3560,7 +3836,11 @@ Current controller state:
 - `loginUser` verifies credentials, generates access and refresh tokens, stores the refresh token, sets auth cookies, and returns the safe user object.
 - `logoutUser` clears auth cookies, invalidates the saved refresh token, and returns an `ApiResponse`.
 - `refreshAccessToken` verifies the incoming refresh token, compares it with the stored token, rotates tokens, and returns the new token pair.
-- `changeCurrentPassword` and `getCurrentUser` have been started in `user.controller.js`, but they are not exported or connected to routes yet.
+- `changeCurrentPassword` verifies the old password, sets the new password, saves the user, and returns an `ApiResponse`.
+- `getCurrentUser` has been started and exported, but its JSON response body still needs to be completed.
+- `updateAccountDetails` updates `fullName` and `email`, but it should await the database update before routing.
+- `updateUserAvatar` uploads a new avatar file to Cloudinary and stores the new avatar URL.
+- `updateCoverImage` uploads a new cover image file to Cloudinary and stores the new cover image URL.
 
 Remaining cleanup before complete auth testing:
 
@@ -3569,4 +3849,6 @@ Remaining cleanup before complete auth testing:
 - Prefer matching response status codes, such as `new ApiResponse(201, ...)` for successful registration.
 - Consider using Cloudinary `secure_url` values for stored media URLs.
 - Check the Cloudinary secret environment key: `CLOUDINARY_APT_SECRET` in `cloudinary.js` should match the actual `.env` key, and `CLOUDINARY_API_SECRET` is the clearer intended name.
-- Export and route `changeCurrentPassword` and `getCurrentUser` only after their response behavior is complete.
+- Complete the `getCurrentUser` response with an `ApiResponse`.
+- Add `await` before `User.findByIdAndUpdate()` in `updateAccountDetails`.
+- Import and route `changeCurrentPassword`, `getCurrentUser`, `updateAccountDetails`, `updateUserAvatar`, and `updateCoverImage` after their response behavior is complete.
